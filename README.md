@@ -12,12 +12,12 @@ Drops into Claude Code as a local Model Context Protocol (MCP) server, stays idl
 |---|---|---|
 | Sprint 1a — Foundation (TRD-001..006) | error types, token redaction, atomic writes, path guards, config, session state | ✅ **Shipped** |
 | Sprint 1b — Core Control (TRD-011..014, TRD-033) | MCP bootstrap, control tools, protocol renderer, convention discovery | ✅ **Shipped** |
-| Sprint 2 — Setup wizard + GitHub client | install.sh, wizard, token validation, issue fetching | ⏳ Pending |
+| Sprint 2 — Setup wizard + GitHub client | install.sh, wizard, token validation, issue fetching | ✅ **Shipped — wizard, token validation, auto-detection landed.** |
 | Sprint 3 — Picker UI + duplicate detection | browser UI, terminal fallback, duplicate-PR checks | ⏳ Pending |
 | Sprint 4 — Code & Git ops | filesystem tools, git CLI wrapper, PR creation, Docker-sandboxed tests, undo | ⏳ Pending |
 | Sprint 5 — Polish & ship | serial queue, polling timer, README polish, packaging | ⏳ Pending |
 
-**What runs today:** `ghia/` package (6 foundation modules + 4 control tools + protocol renderer), tested with 102 passing tests. `server.py` registers with FastMCP, `/issue-agent start/stop/status/set_mode/fetch_now` are callable, but issue-fetching/writing code/opening PRs are still stubs.
+**What runs today:** `ghia/` package (foundation + control tools + protocol renderer + setup wizard + token validator + test/lint auto-detection + command allow-list), tested with 201 passing tests. `server.py` registers with FastMCP, `/issue-agent start/stop/status/set_mode/fetch_now` are callable. Installation is a one-command `bash install.sh` that creates a venv, installs deps, runs the interactive wizard, and registers the MCP server with Claude Code. Issue-fetching / code-writing / PR creation are still stubs until Clusters 4/5.
 
 See `docs/PRD/PRD-2026-001-github-issue-agent.md` and `docs/TRD/TRD-2026-001-github-issue-agent.md` for the full specification and technical design.
 
@@ -49,29 +49,39 @@ Everything else (reading files, writing fixes, running tests, creating branches,
 - **Docker** (for test sandboxing; not required for current Sprint 1 functionality — will be required once Sprint 4 lands)
 - **`gh` CLI** (optional but recommended for PR creation; PyGithub fallback is used if absent)
 
-## Install (developer preview)
+## Install
 
-> The polished one-command `install.sh` ships in Sprint 5. Today's install is manual dev-mode only.
+One command — creates a venv, installs deps, runs the interactive setup wizard, registers with Claude Code:
 
 ```bash
 git clone <this-repo> github-issue-agent
 cd github-issue-agent
-
-# install into an isolated venv
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# editable install so local edits take effect
-pip install -e .
-
-# register with Claude Code (once)
-claude mcp add github-issue-agent -- python -m server
+bash install.sh
 ```
 
-### Configuration
+The installer is idempotent — re-running it upgrades dependencies and re-enters the wizard with your current config values pre-filled as defaults (ENTER accepts each one, type a new value to change it).
 
-Once Sprint 2 ships there will be a bulk-collect wizard (`python -m setup`). For now, create `~/.config/github-issue-agent/config.json` by hand:
+If you only want to re-run the wizard (for example to change your token or swap the target repo), activate the venv and invoke it directly:
+
+```bash
+source .venv/bin/activate
+python -m setup_wizard
+```
+
+### What the wizard asks
+
+- **GitHub token** — masked input. A [fine-grained PAT](https://github.com/settings/personal-access-tokens/new) scoped to a single repo (Issues: R/W, Pull requests: R/W, Contents: R/W) is recommended; classic PATs with `repo` scope also work. The wizard probes `GET /user` to validate the token before persisting anything.
+- **Target repo** in `owner/name` form. The wizard probes `GET /repos/{owner}/{name}` to confirm the token can actually see the repo.
+- **Label** used to tag issues the agent should pick up (default: `ai-fix`).
+- **Mode** — `semi` (approves each step, default) or `full` (runs end-to-end and opens draft PRs).
+- **Poll interval** — how often the agent checks for new labelled issues (default: 30 min, minimum: 5 min).
+- **Test command** and **lint command** — auto-detected from `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `Gemfile`, `pom.xml`, `build.gradle`, `mix.exs` (and more). You can ENTER to accept the detection or type a custom command. Commands are allow-list-validated — shell metacharacters (`&`, `|`, `;`, `$`, backticks) are rejected.
+
+Config is persisted to `~/.config/github-issue-agent/config.json` with `chmod 600`. The token is never printed back to the terminal, logged, or echoed in error messages — `ghia.redaction` scrubs it from every log record with literal-replace + regex safety net.
+
+### Manual config (advanced / offline)
+
+If you need to pre-seed a config without running the wizard (e.g. CI provisioning), the expected schema is:
 
 ```json
 {
@@ -81,7 +91,7 @@ Once Sprint 2 ships there will be a bulk-collect wizard (`python -m setup`). For
   "mode": "semi",
   "poll_interval_min": 30,
   "test_command": "pytest -q",
-  "lint_command": "ruff check"
+  "lint_command": "ruff check ."
 }
 ```
 
@@ -115,7 +125,7 @@ Tools pending from later sprints: `list_issues`, `get_issue`, `pick_issues`, `sk
 python -m pytest tests/ -v
 ```
 
-102 tests today, < 7 seconds runtime. Coverage target is ≥ 80% (enforced at sprint exit).
+201 tests today, < 7 seconds runtime. Coverage target is ≥ 80% (enforced at sprint exit).
 
 ### Run a single test module
 
@@ -145,6 +155,8 @@ logging.warning('token in log: ghp_1234567890abcdefghijklmnopqrstuvwxyz')
 ```
 github-issue-agent/
 ├── server.py                 ← FastMCP entrypoint (TRD-011)
+├── setup_wizard.py           ← interactive bulk-collect wizard (TRD-010)
+├── install.sh                ← one-command installer (TRD-007)
 ├── pyproject.toml            ← packaging; Python >= 3.10
 ├── requirements.txt          ← pinned deps
 ├── ghia/                     ← internal package
@@ -157,11 +169,14 @@ github-issue-agent/
 │   ├── session.py            ← SessionStore with asyncio.Lock
 │   ├── protocol.py           ← agent_protocol.md renderer
 │   ├── convention_scan.py    ← CLAUDE.md / CONTRIBUTING.md discovery
+│   ├── detection.py          ← test-runner / linter auto-detection (TRD-009)
+│   ├── github_client_light.py← minimal httpx client for setup-time probes (TRD-008)
 │   └── tools/
-│       └── control.py        ← start/stop/status/set_mode/fetch_now
+│       ├── control.py        ← start/stop/status/set_mode/fetch_now
+│       └── validation.py     ← command allow-list (TRD-008, AC-017-3)
 ├── prompts/
 │   └── agent_protocol.md     ← injected into Claude on start
-├── tests/                    ← pytest + pytest-asyncio (102 tests)
+├── tests/                    ← pytest + pytest-asyncio (201 tests)
 └── docs/
     ├── PRD/PRD-2026-001-…    ← product requirements (28 REQs, 85 ACs)
     └── TRD/TRD-2026-001-…    ← technical design (76 TRD tasks)
@@ -204,10 +219,10 @@ The template uses:
 Make sure you've activated the venv (`source .venv/bin/activate`) so `python -m server` resolves to the right interpreter. Alternatively register with an absolute path: `claude mcp add github-issue-agent -- /full/path/to/.venv/bin/python -m server`.
 
 **Tools return `{success: false, code: "CONFIG_MISSING"}`**
-Your `~/.config/github-issue-agent/config.json` is missing or unreadable. Create it manually (see above) until Sprint 2 ships the wizard.
+Your `~/.config/github-issue-agent/config.json` is missing or unreadable. Re-run the setup wizard: `source .venv/bin/activate && python -m setup_wizard`.
 
 **Tools return `{success: false, code: "TOKEN_INVALID"}`**
-Token is expired, revoked, or missing required scopes. Regenerate from [github.com/settings/tokens](https://github.com/settings/tokens) and update your config file.
+Token is expired, revoked, or missing required scopes. Regenerate from [github.com/settings/tokens](https://github.com/settings/tokens) or [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) and re-run `python -m setup_wizard` to update the stored token.
 
 **`session.json.bak-{ts}` appears in `state/`**
 Your session file got corrupted (unusual — typically means a disk issue or SIGKILL mid-write) and was auto-rotated to a backup so the agent could start cleanly. The backup is safe to delete once you've confirmed nothing important was in-flight.
