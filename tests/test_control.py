@@ -1,0 +1,270 @@
+"""Control-plane tests (TRD-011-TEST + TRD-012-TEST).
+
+Covers:
+* start from idle → status becomes active, protocol is non-empty
+* start from active → INVALID_INPUT error
+* stop from active → status becomes idle
+* set_mode("full") → SessionState.mode == "full"
+* set_mode("invalid") → INVALID_INPUT error
+* Mid-session: start → set_mode → status reflects new mode immediately
+* fetch_now stub returns ok with fetched=0
+* status returns structured SessionState echo
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from ghia import redaction
+from ghia.app import GhiaApp, create_app
+from ghia.errors import ErrorCode
+from ghia.tools import control
+
+
+# ----------------------------------------------------------------------
+# Fixtures
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_logging_filters() -> None:
+    """Remove any RedactionFilter the test leaks onto the root logger."""
+
+    root = logging.getLogger()
+    before = list(root.filters)
+    redaction.set_token(None)
+    yield
+    for f in list(root.filters):
+        if f not in before:
+            root.removeFilter(f)
+    redaction.set_token(None)
+
+
+def _write_config(path: Path, **overrides: Any) -> None:
+    payload: dict[str, Any] = {
+        "token": "ghp_" + "c" * 36,
+        "repo": "octo/hello",
+        "label": "ai-fix",
+        "mode": "semi",
+        "poll_interval_min": 30,
+    }
+    payload.update(overrides)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+
+
+@pytest.fixture
+async def app(tmp_path: Path) -> GhiaApp:
+    """A fully-wired GhiaApp rooted at ``tmp_path``."""
+
+    cfg_path = tmp_path / "cfg.json"
+    _write_config(cfg_path)
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    return await create_app(repo_root=repo_root, config_path=cfg_path)
+
+
+# ----------------------------------------------------------------------
+# start / stop
+# ----------------------------------------------------------------------
+
+
+async def test_start_from_idle_activates(app: GhiaApp) -> None:
+    resp = await control.issue_agent_start(app)
+
+    assert resp.success, resp.error
+    assert resp.data is not None
+    protocol = resp.data["protocol"]
+    assert isinstance(protocol, str) and protocol
+    # Protocol must reflect the configured repo.
+    assert "octo/hello" in protocol
+
+    state = await app.session.read()
+    assert state.status == "active"
+    assert state.repo == "octo/hello"
+    assert state.session_started is not None
+
+
+async def test_start_from_active_rejected(app: GhiaApp) -> None:
+    first = await control.issue_agent_start(app)
+    assert first.success
+
+    second = await control.issue_agent_start(app)
+    assert not second.success
+    assert second.code == ErrorCode.INVALID_INPUT
+    assert "already active" in (second.error or "").lower()
+
+
+async def test_stop_from_active_returns_to_idle(app: GhiaApp) -> None:
+    await control.issue_agent_start(app)
+    # Simulate some progress so the summary has something to report.
+    await app.session.update(completed=[1, 2], skipped=[3])
+
+    resp = await control.issue_agent_stop(app)
+    assert resp.success
+    assert resp.data["completed_count"] == 2
+    assert resp.data["skipped_count"] == 1
+    assert "2 issues completed" in resp.data["message"]
+
+    state = await app.session.read()
+    assert state.status == "idle"
+    assert state.active_issue is None
+    # History preserved.
+    assert state.completed == [1, 2]
+    assert state.skipped == [3]
+
+
+async def test_stop_from_idle_is_safe(app: GhiaApp) -> None:
+    """Stop is idempotent — calling it from idle doesn't error."""
+
+    resp = await control.issue_agent_stop(app)
+    assert resp.success
+    state = await app.session.read()
+    assert state.status == "idle"
+
+
+# ----------------------------------------------------------------------
+# status
+# ----------------------------------------------------------------------
+
+
+async def test_status_echoes_session_state(app: GhiaApp) -> None:
+    await app.session.update(mode="full", queue=[1, 2, 3])
+    resp = await control.issue_agent_status(app)
+
+    assert resp.success
+    data = resp.data
+    assert data["status"] == "idle"
+    assert data["mode"] == "full"
+    assert data["queue"] == [1, 2, 3]
+    assert "summary" in data
+    assert "queue=3" in data["summary"]
+
+
+async def test_status_after_start_shows_active(app: GhiaApp) -> None:
+    await control.issue_agent_start(app)
+    resp = await control.issue_agent_status(app)
+    assert resp.success
+    assert resp.data["status"] == "active"
+    assert "active" in resp.data["summary"]
+
+
+# ----------------------------------------------------------------------
+# set_mode
+# ----------------------------------------------------------------------
+
+
+async def test_set_mode_to_full_persists(app: GhiaApp) -> None:
+    resp = await control.issue_agent_set_mode(app, "full")
+    assert resp.success
+    assert resp.data["mode"] == "full"
+
+    state = await app.session.read()
+    assert state.mode == "full"
+
+
+async def test_set_mode_to_semi_persists(app: GhiaApp) -> None:
+    await control.issue_agent_set_mode(app, "full")
+    resp = await control.issue_agent_set_mode(app, "semi")
+    assert resp.success
+
+    state = await app.session.read()
+    assert state.mode == "semi"
+
+
+async def test_set_mode_invalid_returns_error(app: GhiaApp) -> None:
+    resp = await control.issue_agent_set_mode(app, "bananas")
+    assert not resp.success
+    assert resp.code == ErrorCode.INVALID_INPUT
+
+
+async def test_set_mode_empty_string_returns_error(app: GhiaApp) -> None:
+    resp = await control.issue_agent_set_mode(app, "")
+    assert not resp.success
+    assert resp.code == ErrorCode.INVALID_INPUT
+
+
+# ----------------------------------------------------------------------
+# Mid-session mode change (AC-007-3/4/5)
+# ----------------------------------------------------------------------
+
+
+async def test_mid_session_mode_change_visible_immediately(app: GhiaApp) -> None:
+    await control.issue_agent_start(app)
+
+    # Flip the mode while active.
+    resp = await control.issue_agent_set_mode(app, "full")
+    assert resp.success
+
+    # Status must see the new mode on the very next call, without any
+    # restart / re-fetch dance.
+    status = await control.issue_agent_status(app)
+    assert status.success
+    assert status.data["mode"] == "full"
+    assert status.data["status"] == "active"
+
+
+# ----------------------------------------------------------------------
+# fetch_now stub
+# ----------------------------------------------------------------------
+
+
+async def test_fetch_now_stub_returns_ok(app: GhiaApp) -> None:
+    resp = await control.issue_agent_fetch_now(app)
+    assert resp.success
+    assert resp.data["fetched"] == 0
+    assert "stub" in resp.data["message"].lower()
+
+
+# ----------------------------------------------------------------------
+# Protocol-shape smoke tests
+# ----------------------------------------------------------------------
+
+
+async def test_start_protocol_contains_both_mode_neutral_sections(app: GhiaApp) -> None:
+    resp = await control.issue_agent_start(app)
+    assert resp.success
+    protocol: str = resp.data["protocol"]
+    # Rules, Naming, Mode changes, Error handling are mode-independent.
+    assert "## Rules (both modes)" in protocol
+    assert "## Naming" in protocol
+    assert "## Error handling" in protocol
+    # Only the semi arm should be present (config default).
+    assert "SEMI-AUTO mode" in protocol
+    assert "FULL-AUTO mode" not in protocol
+
+
+async def test_start_after_mode_change_renders_full_arm(app: GhiaApp) -> None:
+    await control.issue_agent_set_mode(app, "full")
+    resp = await control.issue_agent_start(app)
+    assert resp.success
+    protocol: str = resp.data["protocol"]
+    assert "FULL-AUTO mode" in protocol
+    assert "SEMI-AUTO mode" not in protocol
+
+
+async def test_start_includes_discovered_conventions_preview(
+    tmp_path: Path,
+) -> None:
+    """Drop a CLAUDE.md into the repo root; preview must surface its content."""
+
+    cfg_path = tmp_path / "cfg.json"
+    _write_config(cfg_path)
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "CLAUDE.md").write_text(
+        "# Rules\n\nBe concise.\n"
+    )
+
+    app = await create_app(repo_root=repo_root, config_path=cfg_path)
+    resp = await control.issue_agent_start(app)
+    assert resp.success
+    preview: str = resp.data["discovered_conventions_preview"]
+    assert "Be concise" in preview or "Rules" in preview
+    # Preview is capped at 200 chars.
+    assert len(preview) <= 200
