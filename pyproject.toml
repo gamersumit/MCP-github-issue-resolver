@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "github-issue-agent"
+version = "0.1.0"
+description = "MCP server that helps Claude Code autonomously resolve GitHub issues."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Sumit" },
+]
+keywords = ["mcp", "github", "claude", "agent", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Bug Tracking",
+]
+
+dependencies = [
+    "fastmcp>=2.3,<3.0",
+    "pygithub>=2.5,<3.0",
+    "docker>=7.1,<8.0",
+    "httpx>=0.27,<0.29",
+    "rich>=13.9,<14.0",
+    "pydantic>=2.9,<3.0",
+    "starlette>=0.41,<0.46",
+    "uvicorn>=0.30,<0.36",
+    "tomli>=2.0,<3.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.24,<0.26",
+    "pytest-cov>=5.0,<7.0",
+    "respx>=0.22,<0.24",
+]
+
+[project.scripts]
+github-issue-agent = "server:main"
+
+[tool.setuptools.packages.find]
+include = ["ghia*"]
+exclude = ["tests*", "docs*", "github-issue-agent*"]
+
+# server.py and setup_wizard.py live at the repo root, not under ghia/.
+# Listing them as py-modules makes `pip install .` install them so the
+# `github-issue-agent = "server:main"` console script resolves and
+# `python -m setup_wizard` works for users who only have the wheel.
+#
+# include-package-data + the explicit package-data block below ship the
+# bundled prompt template (ghia/prompts/agent_protocol.md) and the
+# picker UI asset (ghia/ui_static/picker.html) inside the wheel. Without
+# this, `pip install .` produces a wheel that omits the .md/.html files
+# and `issue_agent_start` plus the picker UI both blow up with
+# FileNotFoundError on first use.
+[tool.setuptools]
+py-modules = ["server", "setup_wizard"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"ghia.prompts" = ["*.md"]
+"ghia.ui_static" = ["*.html"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "slow: marks tests as slow",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["ghia"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

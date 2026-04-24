@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>github-issue-agent — picker</title>
+<!--
+  Self-contained picker UI (TRD-019a + TRD-019b).
+  Hard rule: zero external dependencies — no CDN, no Google Fonts,
+  no npm.  All CSS + JS inline so the page loads from the local
+  ASGI server with no network round-trips.
+
+  Theming auto-switches via prefers-color-scheme.  Both palettes
+  meet WCAG AA contrast (>= 4.5:1 for body text, >= 3:1 for UI
+  components).
+-->
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-elev: #f6f7f9;
+    --bg-card: #ffffff;
+    --fg: #111418;
+    --fg-muted: #57606a;
+    --border: #d0d7de;
+    --border-strong: #8c959f;
+    --accent: #0969da;
+    --accent-fg: #ffffff;
+    --danger: #cf222e;
+    --pill-bg: #ddf4ff;
+    --pill-fg: #0969da;
+    --pri-high: #cf222e;
+    --pri-normal: #57606a;
+    --pri-low: #1a7f37;
+    --focus: #0969da;
+    --selected-bg: #ddf4ff;
+    --selected-border: #0969da;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --bg-elev: #161b22;
+      --bg-card: #161b22;
+      --fg: #e6edf3;
+      --fg-muted: #8b949e;
+      --border: #30363d;
+      --border-strong: #6e7681;
+      --accent: #2f81f7;
+      --accent-fg: #ffffff;
+      --danger: #f85149;
+      --pill-bg: #1f3955;
+      --pill-fg: #79c0ff;
+      --pri-high: #ff7b72;
+      --pri-normal: #8b949e;
+      --pri-low: #7ee787;
+      --focus: #2f81f7;
+      --selected-bg: #1f3955;
+      --selected-border: #2f81f7;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+      Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    padding: 16px 20px 12px;
+    background: var(--bg-elev);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    margin: 0 0 4px;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  header p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 13px;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 12px 20px;
+    background: var(--bg-elev);
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+  }
+  .toolbar input[type="search"] {
+    flex: 1 1 240px;
+    min-width: 180px;
+    padding: 8px 12px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+  }
+  .toolbar input[type="search"]:focus,
+  .toolbar select:focus,
+  .toolbar button:focus,
+  .filter-pill:focus,
+  .issue-card:focus,
+  .footer button:focus {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .filter-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+  .filter-group label {
+    color: var(--fg-muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-right: 4px;
+  }
+  .filter-pill {
+    padding: 4px 10px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .filter-pill[aria-pressed="true"] {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+  }
+  .toolbar select {
+    padding: 6px 10px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  main {
+    padding: 16px 20px 96px;
+    max-width: 980px;
+    margin: 0 auto;
+  }
+  .status-line {
+    color: var(--fg-muted);
+    font-size: 13px;
+    margin: 0 0 12px;
+  }
+  .issue-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .issue-card {
+    display: flex;
+    gap: 12px;
+    padding: 12px 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .issue-card[aria-checked="true"] {
+    background: var(--selected-bg);
+    border-color: var(--selected-border);
+  }
+  .issue-card .checkbox {
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--border-strong);
+    border-radius: 4px;
+    margin-top: 2px;
+    position: relative;
+  }
+  .issue-card[aria-checked="true"] .checkbox {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .issue-card[aria-checked="true"] .checkbox::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 0px;
+    width: 5px;
+    height: 10px;
+    border-right: 2px solid var(--accent-fg);
+    border-bottom: 2px solid var(--accent-fg);
+    transform: rotate(45deg);
+  }
+  .issue-body {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .issue-title {
+    margin: 0 0 4px;
+    font-weight: 600;
+    color: var(--fg);
+    overflow-wrap: anywhere;
+  }
+  .issue-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    color: var(--fg-muted);
+    font-size: 12px;
+  }
+  .issue-num {
+    color: var(--fg-muted);
+    font-weight: 500;
+    margin-right: 4px;
+  }
+  .label-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    background: var(--pill-bg);
+    color: var(--pill-fg);
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .priority {
+    text-transform: uppercase;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+  .priority.high { color: var(--pri-high); }
+  .priority.normal { color: var(--pri-normal); }
+  .priority.low { color: var(--pri-low); }
+  .footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    background: var(--bg-elev);
+    border-top: 1px solid var(--border);
+    gap: 12px;
+  }
+  .footer .selected-count {
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .footer .footer-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .footer button {
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .footer button.primary {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+  }
+  .footer button.primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .toast {
+    position: fixed;
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 10px 16px;
+    background: var(--fg);
+    color: var(--bg);
+    border-radius: 6px;
+    font-size: 13px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    z-index: 100;
+  }
+  .toast.error {
+    background: var(--danger);
+    color: #ffffff;
+  }
+  .empty-state {
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--fg-muted);
+  }
+  /* Mobile reflow — single column, no horizontal scroll. */
+  @media (max-width: 600px) {
+    .toolbar {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .toolbar input[type="search"] {
+      width: 100%;
+    }
+    .filter-group {
+      flex-wrap: wrap;
+    }
+    main {
+      padding: 12px 12px 110px;
+    }
+    .footer {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    .footer-actions {
+      justify-content: flex-end;
+    }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>github-issue-agent</h1>
+  <p id="subtitle">Pick issues to fix</p>
+</header>
+
+<div class="toolbar" role="toolbar" aria-label="Filters">
+  <input
+    id="search"
+    type="search"
+    placeholder="Search by title or #number…"
+    aria-label="Search issues"
+    autocomplete="off"
+    spellcheck="false">
+  <div class="filter-group" id="label-filters" aria-label="Label filters">
+    <label>Labels:</label>
+    <!-- pills inserted by JS -->
+  </div>
+  <div class="filter-group" aria-label="Priority filter">
+    <label for="priority-filter">Priority:</label>
+    <select id="priority-filter">
+      <option value="all">All</option>
+      <option value="high">High</option>
+      <option value="normal">Normal</option>
+      <option value="low">Low</option>
+    </select>
+  </div>
+  <div class="filter-group" aria-label="Mode toggle">
+    <label for="mode-select">Mode:</label>
+    <select id="mode-select">
+      <option value="semi">Semi-auto</option>
+      <option value="full">Full-auto</option>
+    </select>
+  </div>
+</div>
+
+<main>
+  <p class="status-line" id="status" aria-live="polite">Loading issues…</p>
+  <ul class="issue-list" id="issue-list" role="list"></ul>
+</main>
+
+<div class="footer" role="contentinfo">
+  <span class="selected-count" id="selected-count">Selected: 0</span>
+  <div class="footer-actions">
+    <button type="button" id="cancel-btn">Cancel</button>
+    <button type="button" id="confirm-btn" class="primary" disabled>Confirm</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- State -----------------------------------------------------
+  // Mutable, kept in module-private closure so the global namespace stays
+  // clean.  Vanilla JS — intentionally no framework, no build step.
+  var state = {
+    issues: [],         // raw payload from /api/issues
+    selected: new Set(),// issue numbers (int) currently picked
+    search: "",
+    activeLabels: new Set(),
+    priority: "all",
+    mode: "semi",
+    focusedIndex: 0,    // index into the *visible* card list
+    visible: [],        // cached filtered list, recomputed on each render
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ---------- Format helpers --------------------------------------------
+
+  function escapeHtml(s) {
+    if (s == null) return "";
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  // Lightweight relative-time — keeps us honest about "no external deps".
+  function relTime(iso) {
+    if (!iso) return "";
+    var t = Date.parse(iso);
+    if (isNaN(t)) return "";
+    var diff = (Date.now() - t) / 1000;
+    if (diff < 60) return "just now";
+    if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+    if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+    if (diff < 86400 * 30) return Math.floor(diff / 86400) + "d ago";
+    if (diff < 86400 * 365) return Math.floor(diff / (86400 * 30)) + "mo ago";
+    return Math.floor(diff / (86400 * 365)) + "y ago";
+  }
+
+  function showToast(message, isError) {
+    var existing = document.querySelector(".toast");
+    if (existing) existing.remove();
+    var div = document.createElement("div");
+    div.className = "toast" + (isError ? " error" : "");
+    div.setAttribute("role", isError ? "alert" : "status");
+    div.textContent = message;
+    document.body.appendChild(div);
+    setTimeout(function () { if (div.parentNode) div.remove(); }, 3500);
+  }
+
+  // ---------- Filtering -------------------------------------------------
+
+  function applyFilters() {
+    var q = state.search.trim().toLowerCase();
+    state.visible = state.issues.filter(function (issue) {
+      // Search: title or "#N" substring.
+      if (q) {
+        var hay = "#" + issue.number + " " + (issue.title || "");
+        if (hay.toLowerCase().indexOf(q) === -1) return false;
+      }
+      // Label filter — issue must carry every active label (AND).
+      if (state.activeLabels.size > 0) {
+        var labels = (issue.labels || []).map(function (l) { return String(l).toLowerCase(); });
+        var ok = true;
+        state.activeLabels.forEach(function (lbl) {
+          if (labels.indexOf(lbl.toLowerCase()) === -1) ok = false;
+        });
+        if (!ok) return false;
+      }
+      // Priority filter.
+      if (state.priority !== "all" && issue.priority !== state.priority) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  // ---------- Rendering -------------------------------------------------
+
+  function renderLabelPills() {
+    // Collect every unique label across all issues so the pill row
+    // doesn't change as filters apply.  Sorted for stability.
+    var seen = {};
+    state.issues.forEach(function (i) {
+      (i.labels || []).forEach(function (l) {
+        seen[String(l)] = true;
+      });
+    });
+    var labels = Object.keys(seen).sort();
+    var container = $("label-filters");
+    // Wipe everything after the static <label>.
+    var staticLabel = container.querySelector("label");
+    container.innerHTML = "";
+    container.appendChild(staticLabel);
+
+    if (labels.length === 0) {
+      var empty = document.createElement("span");
+      empty.style.color = "var(--fg-muted)";
+      empty.style.fontSize = "12px";
+      empty.textContent = "(none)";
+      container.appendChild(empty);
+      return;
+    }
+    labels.forEach(function (lbl) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "filter-pill";
+      btn.textContent = lbl;
+      btn.setAttribute("aria-pressed", state.activeLabels.has(lbl) ? "true" : "false");
+      btn.addEventListener("click", function () {
+        if (state.activeLabels.has(lbl)) {
+          state.activeLabels.delete(lbl);
+          btn.setAttribute("aria-pressed", "false");
+        } else {
+          state.activeLabels.add(lbl);
+          btn.setAttribute("aria-pressed", "true");
+        }
+        rerender();
+      });
+      container.appendChild(btn);
+    });
+  }
+
+  function renderIssues() {
+    var ul = $("issue-list");
+    ul.innerHTML = "";
+    if (state.visible.length === 0) {
+      var empty = document.createElement("li");
+      empty.className = "empty-state";
+      empty.textContent = state.issues.length === 0
+        ? "No open issues found."
+        : "No issues match your filters.";
+      ul.appendChild(empty);
+      return;
+    }
+    state.visible.forEach(function (issue, idx) {
+      var li = document.createElement("li");
+      li.className = "issue-card";
+      li.setAttribute("role", "checkbox");
+      li.setAttribute("tabindex", idx === state.focusedIndex ? "0" : "-1");
+      li.setAttribute("aria-checked", state.selected.has(issue.number) ? "true" : "false");
+      li.dataset.number = String(issue.number);
+      li.dataset.index = String(idx);
+
+      var labelPills = (issue.labels || []).map(function (l) {
+        return '<span class="label-pill">' + escapeHtml(l) + '</span>';
+      }).join(" ");
+
+      var pri = issue.priority || "normal";
+      var meta =
+        '<span class="issue-num">#' + escapeHtml(issue.number) + '</span>' +
+        '<span class="priority ' + escapeHtml(pri) + '">' + escapeHtml(pri) + '</span>' +
+        ' ' + labelPills +
+        ' <span>' + escapeHtml(issue.comments_count || 0) + ' comments</span>' +
+        ' <span>updated ' + escapeHtml(relTime(issue.updated_at)) + '</span>';
+
+      li.innerHTML =
+        '<div class="checkbox" aria-hidden="true"></div>' +
+        '<div class="issue-body">' +
+          '<div class="issue-title">' + escapeHtml(issue.title || '(untitled)') + '</div>' +
+          '<div class="issue-meta">' + meta + '</div>' +
+        '</div>';
+
+      li.addEventListener("click", function () {
+        toggleSelection(issue.number);
+        state.focusedIndex = idx;
+        renderIssues();
+        renderFooter();
+      });
+
+      ul.appendChild(li);
+    });
+
+    // Restore focus to the focused card after re-render.
+    var focusTarget = ul.querySelector('.issue-card[tabindex="0"]');
+    if (focusTarget && document.activeElement &&
+        document.activeElement.classList.contains("issue-card")) {
+      focusTarget.focus();
+    }
+  }
+
+  function renderFooter() {
+    $("selected-count").textContent = "Selected: " + state.selected.size;
+    var btn = $("confirm-btn");
+    btn.disabled = state.selected.size === 0;
+  }
+
+  function renderStatus() {
+    var s = $("status");
+    if (state.issues.length === 0) {
+      s.textContent = "No open issues found.";
+      return;
+    }
+    s.textContent = state.visible.length + " of " +
+      state.issues.length + " issues";
+  }
+
+  function rerender() {
+    applyFilters();
+    if (state.focusedIndex >= state.visible.length) {
+      state.focusedIndex = Math.max(0, state.visible.length - 1);
+    }
+    renderIssues();
+    renderStatus();
+    renderFooter();
+  }
+
+  function toggleSelection(num) {
+    if (state.selected.has(num)) {
+      state.selected.delete(num);
+    } else {
+      state.selected.add(num);
+    }
+  }
+
+  // ---------- Network ---------------------------------------------------
+
+  function loadIssues() {
+    fetch("/api/issues", { headers: { "Accept": "application/json" } })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (resp) {
+        if (!resp.ok || !resp.body || !resp.body.success) {
+          var msg = (resp.body && resp.body.error) || "Failed to load issues.";
+          $("status").textContent = msg;
+          showToast(msg, true);
+          return;
+        }
+        var data = resp.body.data || {};
+        state.issues = data.issues || [];
+        // Subtitle: infer repo from first issue's html_url if present.
+        if (state.issues.length > 0 && state.issues[0].html_url) {
+          var m = /github\.com\/([^/]+\/[^/]+)\/issues/.exec(state.issues[0].html_url);
+          if (m) {
+            $("subtitle").textContent = "Repo: " + m[1] + " — pick issues to fix";
+          }
+        }
+        renderLabelPills();
+        rerender();
+      })
+      .catch(function (err) {
+        var msg = "Network error loading issues: " + err;
+        $("status").textContent = msg;
+        showToast(msg, true);
+      });
+  }
+
+  function postConfirm() {
+    var queue = [];
+    state.selected.forEach(function (n) { queue.push(n); });
+    queue.sort(function (a, b) { return a - b; });
+    var btn = $("confirm-btn");
+    btn.disabled = true;
+    fetch("/api/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ queue: queue, mode: state.mode }),
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (resp) {
+        if (!resp.ok || !resp.body || !resp.body.success) {
+          var msg = (resp.body && resp.body.error) || "Could not save selection.";
+          showToast(msg, true);
+          btn.disabled = false;
+          return;
+        }
+        showToast("Saved — closing tab");
+        // Window-close fallback: most browsers refuse window.close()
+        // for tabs the script didn't open.  We still try, then leave a
+        // visible message if the tab is still here a moment later.
+        setTimeout(function () {
+          window.close();
+          setTimeout(function () {
+            $("status").textContent = "Saved. You can close this tab.";
+          }, 500);
+        }, 600);
+      })
+      .catch(function (err) {
+        showToast("Network error: " + err, true);
+        btn.disabled = false;
+      });
+  }
+
+  function cancel() {
+    // Cancel intentionally makes no API call — the session keeps
+    // whatever queue/mode it had before the picker opened.
+    window.close();
+    setTimeout(function () {
+      $("status").textContent = "Cancelled. You can close this tab.";
+    }, 500);
+  }
+
+  // ---------- Keyboard --------------------------------------------------
+
+  function moveFocus(delta) {
+    if (state.visible.length === 0) return;
+    state.focusedIndex = (state.focusedIndex + delta + state.visible.length) % state.visible.length;
+    renderIssues();
+    var card = document.querySelector('.issue-card[tabindex="0"]');
+    if (card) card.focus();
+  }
+
+  function onCardKey(e) {
+    var target = e.target;
+    if (!target || !target.classList || !target.classList.contains("issue-card")) {
+      return;
+    }
+    if (e.key === " " || e.key === "Spacebar") {
+      e.preventDefault();
+      var num = parseInt(target.dataset.number, 10);
+      toggleSelection(num);
+      target.setAttribute(
+        "aria-checked",
+        state.selected.has(num) ? "true" : "false"
+      );
+      renderFooter();
+      // Rerender to update the visual checkbox state.
+      renderIssues();
+      var refocus = document.querySelector('.issue-card[tabindex="0"]');
+      if (refocus) refocus.focus();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      moveFocus(1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      moveFocus(-1);
+    }
+  }
+
+  function onGlobalKey(e) {
+    // Don't hijack typing in the search box.
+    var inText = e.target && (
+      e.target.tagName === "INPUT" || e.target.tagName === "SELECT" ||
+      e.target.tagName === "TEXTAREA"
+    );
+    if (e.key === "Escape") {
+      e.preventDefault();
+      cancel();
+      return;
+    }
+    if (e.key === "Enter") {
+      // Enter from search/select shouldn't accidentally submit; require
+      // a non-text-input source unless explicitly the confirm button.
+      if (!inText && state.selected.size > 0) {
+        e.preventDefault();
+        postConfirm();
+      }
+    }
+  }
+
+  // ---------- Wire up ---------------------------------------------------
+
+  function init() {
+    $("search").addEventListener("input", function (e) {
+      state.search = e.target.value;
+      rerender();
+    });
+    $("priority-filter").addEventListener("change", function (e) {
+      state.priority = e.target.value;
+      rerender();
+    });
+    $("mode-select").addEventListener("change", function (e) {
+      state.mode = e.target.value;
+    });
+    $("confirm-btn").addEventListener("click", postConfirm);
+    $("cancel-btn").addEventListener("click", cancel);
+
+    document.addEventListener("keydown", onGlobalKey);
+    $("issue-list").addEventListener("keydown", onCardKey);
+
+    loadIssues();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+</script>
+</body>
+</html>

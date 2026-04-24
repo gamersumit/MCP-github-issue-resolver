@@ -1,0 +1,56 @@
+# ----------- Python -----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ----------- Virtual Environments -----------
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# ----------- IDE / Editor -----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ----------- Project specific -----------
+# NEVER commit the config - contains GitHub token
+github-issue-agent/config.json
+config.json
+
+# Runtime state — session.json + rotated backups (session.json.bak-*)
+github-issue-agent/state/
+state/
+
+# Beads issue-tracker SQLite databases (the .jsonl is committed)
+.beads/*.db
+.beads/*.db-journal
+.beads/*.db-wal
+.beads/*.db-shm
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/

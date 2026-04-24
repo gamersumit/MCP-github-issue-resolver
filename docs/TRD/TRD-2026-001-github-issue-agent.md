@@ -178,217 +178,439 @@ github-issue-agent/
 
 ## 3. Master Task List
 
-> Task format: `TRD-NNN: {description} [Nh] [satisfies REQ-NNN(-X)...]`
+> Task format: `- [ ] **TRD-NNN**: {description} (Nh) [satisfies REQ-NNN(-X)...]`
 > Every user-facing task has a paired `TRD-NNN-TEST` verification task.
 
 ### Cluster 1 — Foundation (15h impl + 10h test)
 
-**TRD-001: Error types + structured response schema** `[2h]` `[satisfies REQ-025]`
-- **Validates PRD ACs**: AC-025-1, AC-025-2
-- Implementation checklist:
-  - Given any tool raises Exception, when the FastMCP wrapper catches it, then a `{success: false, error, code}` is returned (never a raw trace).
-  - Given a new error code is added, when tools import `ErrorCode` enum, then only the 16 canonical codes are usable.
-- `[verifies TRD-001]` `TRD-001-TEST` `[1h]`
+- [ ] **TRD-001**: Error types + structured response schema (2h) [satisfies REQ-025]
+  - **Validates PRD ACs**: AC-025-1, AC-025-2
+  - **Implementation AC**:
+    - Given any tool raises Exception, when the FastMCP wrapper catches it, then a `{success: false, error, code}` is returned (never a raw trace).
+    - Given a new error code is added, when tools import `ErrorCode` enum, then only the 16 canonical codes are usable.
 
-**TRD-002: Token redaction utility** `[2h]` `[satisfies REQ-023]`
-- **Validates PRD ACs**: AC-023-1, AC-023-4
-- Two layers: literal replace (primary) + regex `(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{20,255}` (safety net); wired as a `logging.Filter` on the root logger.
-- `[verifies TRD-002]` `TRD-002-TEST` `[2h]` — assert classic PAT AND fine-grained PAT both redacted in log output + in exception messages
+- [ ] **TRD-001-TEST**: Verify error types + structured response schema (1h) [verifies TRD-001] [satisfies REQ-025]
+  - **Test AC**:
+    - Given TRD-001 is implemented, when unit tests run, then AC-025-1 and AC-025-2 both pass.
+    - Given all 16 canonical error codes exist in the `ErrorCode` enum, when the test suite runs, then enum membership is verified and no ad-hoc error strings remain.
 
-**TRD-003: Config loader** `[3h]` `[satisfies REQ-023]`
-- **Validates PRD ACs**: AC-002-1, AC-023-3
-- Load from `~/.config/github-issue-agent/config.json`; ensure chmod 600 on write; schema-validate via Pydantic.
-- `[verifies TRD-003]` `TRD-003-TEST` `[1h]` — assert `-rw-------` mode post-write; reject malformed config
+- [ ] **TRD-002**: Token redaction utility (2h) [satisfies REQ-023]
+  - **Validates PRD ACs**: AC-023-1, AC-023-4
+  - **Implementation AC**:
+    - Given the logger emits a record containing a token, when the redaction filter runs, then the token is literal-replaced before handler emission.
+    - Given a token does not appear in the literal table, when the regex `(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{20,255}` matches, then the match is redacted (safety net).
 
-**TRD-004: Atomic file writer** `[2h]` `[satisfies REQ-015]`
-- **Validates PRD ACs**: AC-015-1, AC-015-2
-- Write to `{target}.tmp.{pid}.{ts}` then `os.replace`; fsync before rename on POSIX.
-- `[verifies TRD-004]` `TRD-004-TEST` `[2h]` — simulate crash between write and rename; original unchanged
+- [ ] **TRD-002-TEST**: Verify token redaction utility (2h) [verifies TRD-002] [satisfies REQ-023]
+  - **Test AC**:
+    - Given a classic PAT `ghp_...` is logged, when the log output is captured, then the token never appears verbatim.
+    - Given a fine-grained PAT `github_pat_...` appears in an exception message, when the exception is logged, then the token is redacted in both the log record and the exception text.
 
-**TRD-005: Path-traversal guard utility** `[2h]` `[satisfies REQ-014]`
-- **Validates PRD ACs**: AC-014-1, AC-014-2, AC-014-3
-- `resolve_inside(repo_root, path) -> Path | raises PathTraversalError` — uses `Path.resolve(strict=False)` then `is_relative_to(repo_root)`; resolves symlinks and rejects if target escapes repo.
-- `[verifies TRD-005]` `TRD-005-TEST` `[2h]` — cases: `..`, absolute path, symlink-escape, valid relative
+- [ ] **TRD-003**: Config loader (3h) [satisfies REQ-023]
+  - **Validates PRD ACs**: AC-002-1, AC-023-3
+  - **Implementation AC**:
+    - Given `~/.config/github-issue-agent/config.json` exists, when the loader runs, then the file is Pydantic-validated and loaded into memory.
+    - Given the loader writes a new config, when the file is persisted, then its mode is chmod 600.
 
-**TRD-006: SessionStore singleton** `[4h]` `[satisfies REQ-006]`
-- **Validates PRD ACs**: AC-006-1, AC-006-2, AC-006-3
-- `asyncio.Lock`-guarded writer; read returns dict snapshot; corruption → `session.json.bak-{ts}` rotation.
-- `[verifies TRD-006]` `TRD-006-TEST` `[2h]` — persistence across process restart; bad-JSON recovery
+- [ ] **TRD-003-TEST**: Verify config loader (1h) [verifies TRD-003] [satisfies REQ-023]
+  - **Test AC**:
+    - Given a freshly written `config.json`, when `stat -c %a` is invoked, then the mode is `600` (`-rw-------`).
+    - Given a malformed config file, when the loader parses it, then a validation error is raised and the load is rejected.
+
+- [ ] **TRD-004**: Atomic file writer (2h) [satisfies REQ-015]
+  - **Validates PRD ACs**: AC-015-1, AC-015-2
+  - **Implementation AC**:
+    - Given a target file path, when the writer persists new content, then it writes to `{target}.tmp.{pid}.{ts}` and then `os.replace` into place.
+    - Given a POSIX filesystem, when the rename is performed, then `fsync` has been called on the temp file before the rename.
+
+- [ ] **TRD-004-TEST**: Verify atomic file writer (2h) [verifies TRD-004] [satisfies REQ-015]
+  - **Test AC**:
+    - Given a crash is simulated between write and rename, when the test inspects the target path, then the original file content is unchanged.
+    - Given an atomic write completes successfully, when the file is re-read, then the new content is present without any leftover `.tmp` artifacts.
+
+- [ ] **TRD-005**: Path-traversal guard utility (2h) [satisfies REQ-014]
+  - **Validates PRD ACs**: AC-014-1, AC-014-2, AC-014-3
+  - **Implementation AC**:
+    - Given a path attempts to escape via `..` or an absolute path, when `resolve_inside(repo_root, path)` is called, then `PathTraversalError` is raised.
+    - Given a symlink points outside `repo_root`, when `resolve_inside` resolves the target, then it rejects the path after `Path.resolve(strict=False)` + `is_relative_to(repo_root)` check.
+
+- [ ] **TRD-005-TEST**: Verify path-traversal guard utility (2h) [verifies TRD-005] [satisfies REQ-014]
+  - **Test AC**:
+    - Given cases `..`, absolute path, symlink-escape, and a valid relative path, when each is passed to `resolve_inside`, then the first three raise `PathTraversalError` and the last returns a resolved `Path`.
+    - Given AC-014-1, AC-014-2, AC-014-3, when the test suite runs, then every listed AC passes.
+
+- [ ] **TRD-006**: SessionStore singleton (4h) [satisfies REQ-006]
+  - **Validates PRD ACs**: AC-006-1, AC-006-2, AC-006-3
+  - **Implementation AC**:
+    - Given multiple async tasks try to mutate state, when they go through the SessionStore, then all writes serialize through `asyncio.Lock` and read returns an immutable dict snapshot.
+    - Given `session.json` is corrupted, when the store loads, then it rotates the file to `session.json.bak-{ts}` and starts fresh.
+
+- [ ] **TRD-006-TEST**: Verify SessionStore singleton (2h) [verifies TRD-006] [satisfies REQ-006]
+  - **Test AC**:
+    - Given the process is restarted, when the SessionStore reloads, then state written before the restart is still present.
+    - Given a bad-JSON `session.json`, when the store initializes, then the corrupt file is rotated to `.bak-{ts}` and a fresh empty session is created.
 
 ### Cluster 2 — Setup (13h impl + 5h test)
 
-**TRD-007: install.sh bootstrapper** `[3h]` `[satisfies REQ-001, REQ-004]`
-- **Validates PRD ACs**: AC-001-1, AC-001-2, AC-001-3, AC-004-1
-- Python 3.10 check → `pip install` → run `setup.py` → `claude mcp add`.
-- `[verifies TRD-007]` `TRD-007-TEST` `[1h]` — shellcheck + mocked-env idempotency
+- [ ] **TRD-007**: install.sh bootstrapper (3h) [satisfies REQ-001, REQ-004]
+  - **Validates PRD ACs**: AC-001-1, AC-001-2, AC-001-3, AC-004-1
+  - **Implementation AC**:
+    - Given a machine with Python ≥3.10, when `install.sh` runs, then it pip-installs the package, invokes `setup.py` wizard, and registers via `claude mcp add`.
+    - Given Python is missing or <3.10, when `install.sh` runs, then it exits with a clear diagnostic and non-zero status.
 
-**TRD-008: Token validation function** `[2h]` `[satisfies REQ-003]`
-- **Validates PRD ACs**: AC-003-1, AC-003-2, AC-003-3
-- `validate_token(token) -> {user, scopes}`; raises on 401/403.
-- `[verifies TRD-008]` `TRD-008-TEST` `[1h]` — mock GET /user 200/401/403, check scope warnings
+- [ ] **TRD-007-TEST**: Verify install.sh bootstrapper (1h) [verifies TRD-007] [satisfies REQ-001, REQ-004]
+  - **Test AC**:
+    - Given `install.sh` is linted with shellcheck, when CI runs, then there are no errors.
+    - Given a mocked environment, when `install.sh` is invoked twice, then the second run is idempotent (no duplicate MCP registration, no reinstall).
 
-**TRD-009: Test-runner / linter auto-detection** `[3h]` `[satisfies REQ-002]`
-- **Validates PRD ACs**: AC-002-4, AC-002-5
-- File-signal matrix per spec (pyproject.toml, package.json, Cargo.toml, go.mod, Gemfile+spec/, pom.xml; ruff.toml, .eslintrc, rubocop.yml).
-- `[verifies TRD-009]` `TRD-009-TEST` `[1h]` — fixture repos per ecosystem; confirm detection
+- [ ] **TRD-008**: Token validation function (2h) [satisfies REQ-003]
+  - **Validates PRD ACs**: AC-003-1, AC-003-2, AC-003-3
+  - **Implementation AC**:
+    - Given a token, when `validate_token(token)` calls `GET /user`, then on 200 it returns `{user, scopes}`.
+    - Given a token, when `validate_token` receives 401 or 403, then it raises with a structured error code.
 
-**TRD-010: Setup wizard CLI** `[5h]` `[satisfies REQ-002, REQ-003]`
-- **Validates PRD ACs**: AC-002-1 through AC-002-5
-- `rich.prompt`-based bulk flow; re-entrant via `/issue-agent setup`.
-- `[verifies TRD-010]` `TRD-010-TEST` `[2h]` — scripted stdin happy path + re-run preserving defaults
+- [ ] **TRD-008-TEST**: Verify token validation function (1h) [verifies TRD-008] [satisfies REQ-003]
+  - **Test AC**:
+    - Given mocked `GET /user` responses of 200/401/403, when `validate_token` is called, then success/invalid/forbidden branches are all exercised.
+    - Given a token with insufficient scopes, when `validate_token` inspects the response headers, then it returns a scope warning.
+
+- [ ] **TRD-009**: Test-runner / linter auto-detection (3h) [satisfies REQ-002]
+  - **Validates PRD ACs**: AC-002-4, AC-002-5
+  - **Implementation AC**:
+    - Given a repo with `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `Gemfile`+`spec/`, or `pom.xml`, when detection runs, then the correct test-runner command is proposed.
+    - Given linter signals `ruff.toml`, `.eslintrc`, or `rubocop.yml`, when detection runs, then the matching linter command is proposed.
+
+- [ ] **TRD-009-TEST**: Verify test-runner / linter auto-detection (1h) [verifies TRD-009] [satisfies REQ-002]
+  - **Test AC**:
+    - Given fixture repos per ecosystem (py/js/rust/go/ruby/java), when detection runs against each, then the expected test-runner command is produced.
+    - Given fixture repos with various linter configs, when detection runs, then the expected linter command is produced.
+
+- [ ] **TRD-010**: Setup wizard CLI (5h) [satisfies REQ-002, REQ-003]
+  - **Validates PRD ACs**: AC-002-1 through AC-002-5
+  - **Implementation AC**:
+    - Given `/issue-agent setup` is invoked, when the wizard runs, then it uses `rich.prompt` for a bulk flow and persists the resulting config.
+    - Given the wizard is re-entered after an initial run, when the user proceeds, then previous answers are shown as defaults and can be preserved.
+
+- [ ] **TRD-010-TEST**: Verify setup wizard CLI (2h) [verifies TRD-010] [satisfies REQ-002, REQ-003]
+  - **Test AC**:
+    - Given scripted stdin for a happy-path flow, when the wizard completes, then a well-formed `config.json` is written.
+    - Given a second invocation with scripted stdin accepting defaults, when the wizard completes, then previous values are preserved.
 
 ### Cluster 3 — Core Control (13h impl + 5h test)
 
-**TRD-011: MCP server bootstrap, idle-by-default** `[3h]` `[satisfies REQ-005, REQ-009, INFRA]`
-- **Validates PRD ACs**: AC-005-1, AC-005-2, AC-009-1, AC-009-2
-- FastMCP initialization; tool registration; `/issue-agent help` slash-command table.
-- `[verifies TRD-011]` `TRD-011-TEST` `[1h]` — MCP loads idle; no polling task created
+- [ ] **TRD-011**: MCP server bootstrap, idle-by-default (3h) [satisfies REQ-005, REQ-009, INFRA]
+  - **Validates PRD ACs**: AC-005-1, AC-005-2, AC-009-1, AC-009-2
+  - **Implementation AC**:
+    - Given the MCP process starts, when FastMCP initializes and registers tools, then no polling task is created and status is `idle`.
+    - Given `/issue-agent help` is invoked, when the command runs, then a complete slash-command table is returned.
 
-**TRD-012: Control tools** `[5h]` `[satisfies REQ-005, REQ-007, REQ-008, REQ-009]` `[depends: TRD-006, TRD-013]`
-- **Validates PRD ACs**: AC-007-1 through AC-007-5, AC-008-1, AC-008-2
-- `issue_agent_{start,stop,status,set_mode,fetch_now}`. Immediate mode switch verified by per-checkpoint `should_prompt_user()` helper reading live SessionStore.
-- `[verifies TRD-012]` `TRD-012-TEST` `[2h]` — full→semi and semi→full mid-flow; stop cancels polling task
+- [ ] **TRD-011-TEST**: Verify MCP server bootstrap, idle-by-default (1h) [verifies TRD-011] [satisfies REQ-005, REQ-009, INFRA]
+  - **Test AC**:
+    - Given the MCP process starts up, when the event loop is inspected, then no polling task exists and SessionStore status is `idle`.
+    - Given `/issue-agent help` is invoked on a fresh install, when the response is parsed, then every registered slash command is listed.
 
-**TRD-013: Protocol template renderer** `[2h]` `[satisfies REQ-020]` `[depends: TRD-033]`
-- **Validates PRD ACs**: AC-020-1, AC-020-2
-- Jinja2-style (or f-string) substitution; omits semi section when mode=full.
-- `[verifies TRD-013]` `TRD-013-TEST` `[1h]` — mode-dependent section omission
+- [ ] **TRD-012**: Control tools (5h) [satisfies REQ-005, REQ-007, REQ-008, REQ-009] [depends: TRD-006, TRD-013]
+  - **Validates PRD ACs**: AC-007-1 through AC-007-5, AC-008-1, AC-008-2
+  - **Implementation AC**:
+    - Given `issue_agent_{start,stop,status,set_mode,fetch_now}` are registered, when each is called, then it manipulates SessionStore under the lock and returns a structured response.
+    - Given a mode switch at mid-issue, when the next checkpoint calls `should_prompt_user()`, then the helper reads the live SessionStore mode (verifying immediate effect in both directions).
 
-**TRD-014: Convention discovery (Step 0)** `[3h]` `[satisfies REQ-020b]` `[depends: TRD-006, TRD-022]`
-- **Validates PRD ACs**: AC-020b-1, AC-020b-2, AC-020b-3
-- Reads CLAUDE.md, CONTRIBUTING.md, AGENTS.md, `.cursor/rules/*.md`, `.editorconfig`, README.md; summary cached in SessionStore.
-- `[verifies TRD-014]` `TRD-014-TEST` `[1h]` — present/absent cases; cache reuse across issues
+- [ ] **TRD-012-TEST**: Verify control tools (2h) [verifies TRD-012] [satisfies REQ-005, REQ-007, REQ-008, REQ-009]
+  - **Test AC**:
+    - Given a semi-mode issue is mid-workflow, when `set_mode("full")` is called followed by the next checkpoint, then the checkpoint is skipped; and vice versa for full→semi.
+    - Given `issue_agent_stop` is invoked while polling is active, when stop completes, then the polling asyncio task is cancelled and SessionStore status is `idle`.
+
+- [ ] **TRD-013**: Protocol template renderer (2h) [satisfies REQ-020] [depends: TRD-033]
+  - **Validates PRD ACs**: AC-020-1, AC-020-2
+  - **Implementation AC**:
+    - Given `agent_protocol.md` with placeholder vars, when the renderer substitutes variables, then the output contains all expected substitutions (Jinja2-style or f-string).
+    - Given `mode=full`, when the renderer runs, then the semi-only section is omitted from the output.
+
+- [ ] **TRD-013-TEST**: Verify protocol template renderer (1h) [verifies TRD-013] [satisfies REQ-020]
+  - **Test AC**:
+    - Given `mode=full` and `mode=semi`, when the renderer produces output for each, then only the semi variant contains the semi-specific checkpoint section.
+    - Given all placeholders in the template, when rendered with a full variable set, then no unresolved `{{var}}` tokens remain in the output.
+
+- [ ] **TRD-014**: Convention discovery (Step 0) (3h) [satisfies REQ-020b] [depends: TRD-006, TRD-022]
+  - **Validates PRD ACs**: AC-020b-1, AC-020b-2, AC-020b-3
+  - **Implementation AC**:
+    - Given the repo root, when Step 0 runs, then it reads `CLAUDE.md`, `CONTRIBUTING.md`, `AGENTS.md`, `.cursor/rules/*.md`, `.editorconfig`, and `README.md` and builds a summary.
+    - Given the summary is produced, when it is written to SessionStore, then subsequent issues reuse the cached summary without re-reading files.
+
+- [ ] **TRD-014-TEST**: Verify convention discovery (Step 0) (1h) [verifies TRD-014] [satisfies REQ-020b]
+  - **Test AC**:
+    - Given a fixture repo with all convention files present, when discovery runs, then the summary contains entries from every file.
+    - Given a fixture repo with no convention files, when discovery runs, then it completes gracefully with an empty-but-valid summary and caches it in SessionStore.
 
 ### Cluster 4 — Issue Ops & Picker (25h impl + 14h test)
 
-**TRD-015: GitHub client wrapper** `[3h]` `[satisfies REQ-023, REQ-024, REQ-025]` `[depends: TRD-002, TRD-001]`
-- **Validates PRD ACs**: AC-024-1, AC-024-2
-- PyGithub + httpx; token passed once at construction; logger wired through redaction filter; rate-limit parser reads `X-RateLimit-Remaining` + `X-RateLimit-Reset`.
-- `[verifies TRD-015]` `TRD-015-TEST` `[1h]` — mocked 403 rate-limit parsed; token never in exception text
+- [ ] **TRD-015**: GitHub client wrapper (3h) [satisfies REQ-023, REQ-024, REQ-025] [depends: TRD-002, TRD-001]
+  - **Validates PRD ACs**: AC-024-1, AC-024-2
+  - **Implementation AC**:
+    - Given a token at construction, when the client is built, then its logger is wired through the redaction filter and the token is never logged.
+    - Given a 403 rate-limit response, when the client parses it, then `X-RateLimit-Remaining` and `X-RateLimit-Reset` are extracted into a structured error.
 
-**TRD-016: Issue tools** `[4h]` `[satisfies REQ-010, REQ-013]` `[depends: TRD-015]`
-- **Validates PRD ACs**: AC-010-1, AC-010-2, AC-013-1, AC-013-2
-- `list_issues`, `get_issue`, `pick_issues`, `skip_issue`, `post_issue_comment`.
-- `[verifies TRD-016]` `TRD-016-TEST` `[2h]` — priority derivation, label filter, comment post verified
+- [ ] **TRD-015-TEST**: Verify GitHub client wrapper (1h) [verifies TRD-015] [satisfies REQ-023, REQ-024, REQ-025]
+  - **Test AC**:
+    - Given a mocked 403 rate-limit response, when the client raises, then the error carries parsed reset-time data and correct error code.
+    - Given any error raised by the client, when its message is inspected, then the GitHub token never appears in the exception text.
 
-**TRD-017: Duplicate PR detection** `[3h]` `[satisfies REQ-013b]` `[depends: TRD-015, TRD-023]`
-- **Validates PRD ACs**: AC-013b-1, AC-013b-2, AC-013b-3
-- `check_issue_has_open_pr(n)` — search open PRs via `gh pr list --json` + local branch probe; warn user, never auto-skip.
-- `[verifies TRD-017]` `TRD-017-TEST` `[2h]` — dup via body keyword; dup via branch; no dup
+- [ ] **TRD-016**: Issue tools (4h) [satisfies REQ-010, REQ-013] [depends: TRD-015]
+  - **Validates PRD ACs**: AC-010-1, AC-010-2, AC-013-1, AC-013-2
+  - **Implementation AC**:
+    - Given a label filter, when `list_issues` is called, then issues matching the label are returned with derived priority metadata.
+    - Given an issue number and a comment body, when `post_issue_comment` is called, then the comment is persisted on GitHub via the client wrapper.
 
-**TRD-018: UI server (Starlette sub-app)** `[4h]` `[satisfies REQ-011]` `[depends: TRD-016, TRD-006]`
-- **Validates PRD ACs**: AC-011-1, AC-011-6
-- Routes: `GET /api/issues`, `POST /api/confirm`, `GET /` serves picker.html; bind 127.0.0.1 only.
-- `[verifies TRD-018]` `TRD-018-TEST` `[2h]` — API contract tests
+- [ ] **TRD-016-TEST**: Verify issue tools (2h) [verifies TRD-016] [satisfies REQ-010, REQ-013]
+  - **Test AC**:
+    - Given a mocked list of issues with various labels, when `list_issues` applies a label filter, then only matching issues are returned and priority is correctly derived.
+    - Given a mocked comment POST, when `post_issue_comment` is invoked, then the request body matches the expected comment payload.
 
-**TRD-019a: picker.html — layout, cards, filters, search** `[3h]` `[satisfies REQ-011]` `[depends: TRD-018]`
-- **Validates PRD ACs**: AC-011-3, AC-011-5
-- Self-contained HTML; no external deps; light/dark auto.
-- `[verifies TRD-019a]` `TRD-019a-TEST` `[2h]` — Playwright: search filters, mobile reflow
+- [ ] **TRD-017**: Duplicate PR detection (3h) [satisfies REQ-013b] [depends: TRD-015, TRD-023]
+  - **Validates PRD ACs**: AC-013b-1, AC-013b-2, AC-013b-3
+  - **Implementation AC**:
+    - Given an issue number, when `check_issue_has_open_pr(n)` runs, then it queries `gh pr list --json` and probes local branches, returning a warning flag rather than auto-skipping.
+    - Given a match is found, when the caller decides, then the caller (not this tool) chooses whether to skip.
 
-**TRD-019b: picker.html — keyboard & submit flow** `[3h]` `[satisfies REQ-011]` `[depends: TRD-019a]`
-- **Validates PRD ACs**: AC-011-4, AC-011-6
-- Space/Enter/Escape; POST /api/confirm; auto-close tab.
-- `[verifies TRD-019b]` `TRD-019b-TEST` `[2h]` — keyboard events + confirm POST
+- [ ] **TRD-017-TEST**: Verify duplicate PR detection (2h) [verifies TRD-017] [satisfies REQ-013b]
+  - **Test AC**:
+    - Given a PR body referencing the issue keyword and a local branch matching the issue pattern, when detection runs, then both signals are reported.
+    - Given no matching PR or branch, when detection runs, then the result is a clean `no duplicate` response.
 
-**TRD-020: Terminal fallback picker** `[3h]` `[satisfies REQ-011]` `[depends: TRD-016]`
-- **Validates PRD ACs**: AC-011-2
-- `rich.prompt.Confirm` + interactive checkbox list; same JSON contract as browser UI.
-- `[verifies TRD-020]` `TRD-020-TEST` `[2h]` — scripted stdin
+- [ ] **TRD-018**: UI server (Starlette sub-app) (4h) [satisfies REQ-011] [depends: TRD-016, TRD-006]
+  - **Validates PRD ACs**: AC-011-1, AC-011-6
+  - **Implementation AC**:
+    - Given the sub-app mounts, when clients hit `GET /api/issues`, `POST /api/confirm`, or `GET /`, then each route returns the expected content/shape and `GET /` serves `picker.html`.
+    - Given the listener binds, when inspected, then it is bound to `127.0.0.1` only (no external interface exposure).
 
-**TRD-021: UI opener with headless detection** `[2h]` `[satisfies REQ-011]` `[depends: TRD-018, TRD-020]`
-- **Validates PRD ACs**: AC-011-1, AC-011-2
-- `webbrowser.open()` with probe: `$DISPLAY` empty + `$SSH_CONNECTION` set + `xdg-open`/`open` missing → terminal path.
-- `[verifies TRD-021]` `TRD-021-TEST` `[1h]` — mocked env var matrix
+- [ ] **TRD-018-TEST**: Verify UI server (Starlette sub-app) (2h) [verifies TRD-018] [satisfies REQ-011]
+  - **Test AC**:
+    - Given the server is running, when contract tests hit each route, then responses match the documented JSON schema.
+    - Given the server starts, when the bind address is inspected, then it is `127.0.0.1` (not `0.0.0.0`).
+
+- [ ] **TRD-019a**: picker.html — layout, cards, filters, search (3h) [satisfies REQ-011] [depends: TRD-018]
+  - **Validates PRD ACs**: AC-011-3, AC-011-5
+  - **Implementation AC**:
+    - Given `picker.html` loads, when the DOM renders, then it is self-contained (no external deps) and auto-switches light/dark based on system preference.
+    - Given the user types in the search box or toggles a filter, when the UI updates, then only matching issue cards remain visible.
+
+- [ ] **TRD-019a-TEST**: Verify picker.html layout, cards, filters, search (2h) [verifies TRD-019a] [satisfies REQ-011]
+  - **Test AC**:
+    - Given a seeded list of issues, when Playwright types a search term, then only matching cards remain in the DOM.
+    - Given a mobile viewport, when Playwright resizes the page, then the layout reflows without horizontal overflow.
+
+- [ ] **TRD-019b**: picker.html — keyboard & submit flow (3h) [satisfies REQ-011] [depends: TRD-019a]
+  - **Validates PRD ACs**: AC-011-4, AC-011-6
+  - **Implementation AC**:
+    - Given the picker has focus, when the user presses Space/Enter/Escape, then selection-toggle, confirm, and cancel actions fire respectively.
+    - Given the user confirms, when the submit handler runs, then it POSTs to `/api/confirm` and auto-closes the tab on success.
+
+- [ ] **TRD-019b-TEST**: Verify picker.html keyboard & submit flow (2h) [verifies TRD-019b] [satisfies REQ-011]
+  - **Test AC**:
+    - Given Playwright drives keyboard events, when Space/Enter/Escape are pressed, then the matching UI state changes are observed.
+    - Given a confirm action, when the network is captured, then a POST to `/api/confirm` with the selected queue is recorded.
+
+- [ ] **TRD-020**: Terminal fallback picker (3h) [satisfies REQ-011] [depends: TRD-016]
+  - **Validates PRD ACs**: AC-011-2
+  - **Implementation AC**:
+    - Given no browser is available, when the terminal picker runs, then it presents a `rich.prompt.Confirm` plus interactive checkbox list.
+    - Given the user confirms selections, when the picker returns, then the JSON contract matches the browser UI's `POST /api/confirm` shape.
+
+- [ ] **TRD-020-TEST**: Verify terminal fallback picker (2h) [verifies TRD-020] [satisfies REQ-011]
+  - **Test AC**:
+    - Given scripted stdin that selects a subset of issues, when the picker exits, then the returned queue matches the expected selection.
+    - Given scripted stdin that confirms without selections, when the picker exits, then an empty queue is returned without crashing.
+
+- [ ] **TRD-021**: UI opener with headless detection (2h) [satisfies REQ-011] [depends: TRD-018, TRD-020]
+  - **Validates PRD ACs**: AC-011-1, AC-011-2
+  - **Implementation AC**:
+    - Given a display environment is available, when the opener runs, then `webbrowser.open()` launches the picker at `localhost:4242`.
+    - Given headless conditions (`$DISPLAY` empty, `$SSH_CONNECTION` set, no `xdg-open`/`open`), when the opener detects them, then it falls back to the terminal picker path.
+
+- [ ] **TRD-021-TEST**: Verify UI opener with headless detection (1h) [verifies TRD-021] [satisfies REQ-011]
+  - **Test AC**:
+    - Given a mocked environment with display available, when the opener is called, then `webbrowser.open` is invoked.
+    - Given a mocked headless environment matrix, when the opener is called, then the terminal fallback is selected.
 
 ### Cluster 5 — Code & Git Ops (27h impl + 13h test)
 
-**TRD-022: Filesystem tools** `[4h]` `[satisfies REQ-014, REQ-015]` `[depends: TRD-004, TRD-005]`
-- **Validates PRD ACs**: AC-014-1, AC-014-2, AC-014-3, AC-015-1, AC-015-2
-- `read_file`, `write_file`, `list_directory`, `search_codebase`, `get_repo_structure`, `read_multiple_files`.
-- `[verifies TRD-022]` `TRD-022-TEST` `[2h]`
+- [ ] **TRD-022**: Filesystem tools (4h) [satisfies REQ-014, REQ-015] [depends: TRD-004, TRD-005]
+  - **Validates PRD ACs**: AC-014-1, AC-014-2, AC-014-3, AC-015-1, AC-015-2
+  - **Implementation AC**:
+    - Given any filesystem tool (`read_file`, `write_file`, `list_directory`, `search_codebase`, `get_repo_structure`, `read_multiple_files`), when it receives a path, then the path is routed through the traversal guard before any I/O.
+    - Given `write_file`, when it persists content, then it uses the atomic writer (temp + `os.replace`).
 
-**TRD-023: Git tools + default-branch detection** `[5h]` `[satisfies REQ-016]`
-- **Validates PRD ACs**: AC-016-1 through AC-016-6
-- `create_branch`, `git_diff`, `commit_changes`, `push_branch`, `get_current_branch`, `get_default_branch`; all via `asyncio.to_thread(subprocess.run)`; branch-name uniqueness retry (-v2/-v3/...).
-- `[verifies TRD-023]` `TRD-023-TEST` `[2h]` — fixture repos w/ main, master, develop defaults
+- [ ] **TRD-022-TEST**: Verify filesystem tools (2h) [verifies TRD-022] [satisfies REQ-014, REQ-015]
+  - **Test AC**:
+    - Given an escape attempt (`..`, absolute path, symlink), when any fs tool is invoked, then the operation is rejected with a structured error.
+    - Given `write_file` writes and then a crash is simulated, when the file is re-read, then either the full new content or the full old content is present (no partial writes).
 
-**TRD-024: PR creation** `[4h]` `[satisfies REQ-018, REQ-021]` `[depends: TRD-023, TRD-015]`
-- **Validates PRD ACs**: AC-018-1, AC-018-2, AC-018-3, AC-021-2
-- `create_pr(title, body, draft)`; prefers `gh pr create`, falls back to PyGithub; enforces "Closes #N" in body; default `draft=true` when SessionStore.mode == "full".
-- `[verifies TRD-024]` `TRD-024-TEST` `[2h]` — draft in full mode; closes marker present
+- [ ] **TRD-023**: Git tools + default-branch detection (5h) [satisfies REQ-016]
+  - **Validates PRD ACs**: AC-016-1 through AC-016-6
+  - **Implementation AC**:
+    - Given any git tool (`create_branch`, `git_diff`, `commit_changes`, `push_branch`, `get_current_branch`, `get_default_branch`), when invoked, then it runs via `asyncio.to_thread(subprocess.run)` without blocking the event loop.
+    - Given a branch-name collision, when `create_branch` retries, then it appends `-v2`, `-v3`, ... until a unique name is found.
 
-**TRD-025: Linting tool** `[3h]` `[satisfies REQ-017b]` `[depends: TRD-023]`
-- **Validates PRD ACs**: AC-017b-1, AC-017b-2, AC-017b-3
-- `check_linting()` runs configured linter on `git diff --name-only` output; allow-list validated.
-- `[verifies TRD-025]` `TRD-025-TEST` `[1h]` — ruff fixture; bad-command rejection
+- [ ] **TRD-023-TEST**: Verify git tools + default-branch detection (2h) [verifies TRD-023] [satisfies REQ-016]
+  - **Test AC**:
+    - Given fixture repos whose default branch is `main`, `master`, and `develop`, when `get_default_branch` runs, then it returns the correct branch for each.
+    - Given a pre-existing branch name, when `create_branch` runs, then it produces a `-v2` suffix (and `-v3` on a further collision).
 
-**TRD-026a: Docker sandbox — happy path + unavailable** `[3h]` `[satisfies REQ-017]`
-- **Validates PRD ACs**: AC-017-1, AC-017-2
-- Docker SDK client; mount repo RO + `/tmp/test-output` RW; 10-min wall clock; structured `{passed, failed, errors, output}`.
-- `[verifies TRD-026a]` `TRD-026a-TEST` `[2h]` — live container with fixture; mocked DOCKER_UNAVAILABLE
+- [ ] **TRD-024**: PR creation (4h) [satisfies REQ-018, REQ-021] [depends: TRD-023, TRD-015]
+  - **Validates PRD ACs**: AC-018-1, AC-018-2, AC-018-3, AC-021-2
+  - **Implementation AC**:
+    - Given `SessionStore.mode == "full"`, when `create_pr` is called without an explicit `draft` flag, then the PR is created as a draft.
+    - Given the PR body is provided, when `create_pr` builds the final body, then "Closes #N" is enforced in the text; `gh pr create` is preferred, PyGithub is the fallback.
 
-**TRD-026b: Docker sandbox — allow-list + read-only enforcement** `[3h]` `[satisfies REQ-017]` `[depends: TRD-026a]`
-- **Validates PRD ACs**: AC-017-3, AC-017-4
-- Allow-list regex at config load; runtime escape attempt (write outside output volume) returns failure.
-- `[verifies TRD-026b]` `TRD-026b-TEST` `[1h]`
+- [ ] **TRD-024-TEST**: Verify PR creation (2h) [verifies TRD-024] [satisfies REQ-018, REQ-021]
+  - **Test AC**:
+    - Given `SessionStore.mode == "full"`, when `create_pr` runs against a mocked backend, then the PR payload has `draft=true`.
+    - Given any PR body supplied by the caller, when the final body is assembled, then a "Closes #N" marker is always present.
 
-**TRD-027: Retry wrapper for full-auto** `[2h]` `[satisfies REQ-022]` `[depends: TRD-025, TRD-026a]`
-- **Validates PRD ACs**: AC-022-1, AC-022-2
-- `@with_retries(max=3)` around lint+test block; on final failure labels issue `human-review`.
-- `[verifies TRD-027]` `TRD-027-TEST` `[1h]`
+- [ ] **TRD-025**: Linting tool (3h) [satisfies REQ-017b] [depends: TRD-023]
+  - **Validates PRD ACs**: AC-017b-1, AC-017b-2, AC-017b-3
+  - **Implementation AC**:
+    - Given the configured linter and the output of `git diff --name-only`, when `check_linting()` runs, then it lints only the changed files and returns structured pass/fail results.
+    - Given a linter command that fails the allow-list regex, when the config loads, then the command is rejected (never invoked).
 
-**TRD-028: Undo / rollback** `[3h]` `[satisfies REQ-019]` `[depends: TRD-023]`
-- **Validates PRD ACs**: AC-019-1, AC-019-2, AC-019-3
-- `undo_last_change()`; checks commit author matches configured identity; refuses on default branch (dynamic).
-- `[verifies TRD-028]` `TRD-028-TEST` `[2h]`
+- [ ] **TRD-025-TEST**: Verify linting tool (1h) [verifies TRD-025] [satisfies REQ-017b]
+  - **Test AC**:
+    - Given a ruff fixture with a known lint violation on a changed file, when `check_linting` runs, then the violation is reported in the structured result.
+    - Given a linter command that does not match the allow-list, when the config tries to load it, then loading is rejected with a structured error.
+
+- [ ] **TRD-026a**: Docker sandbox — happy path + unavailable (3h) [satisfies REQ-017]
+  - **Validates PRD ACs**: AC-017-1, AC-017-2
+  - **Implementation AC**:
+    - Given Docker is available, when `run_tests` runs, then a container mounts the repo read-only + `/tmp/test-output` RW, a 10-minute wall clock enforces timeout, and results return as `{passed, failed, errors, output}`.
+    - Given Docker is unavailable, when `run_tests` runs, then a `DOCKER_UNAVAILABLE` error is returned without a raw trace.
+
+- [ ] **TRD-026a-TEST**: Verify Docker sandbox happy path + unavailable (2h) [verifies TRD-026a] [satisfies REQ-017]
+  - **Test AC**:
+    - Given a live container and a fixture test suite, when `run_tests` runs, then the structured result reflects expected pass/fail counts.
+    - Given Docker is mocked as unavailable, when `run_tests` runs, then a `DOCKER_UNAVAILABLE` structured error is returned.
+
+- [ ] **TRD-026b**: Docker sandbox — allow-list + read-only enforcement (3h) [satisfies REQ-017] [depends: TRD-026a]
+  - **Validates PRD ACs**: AC-017-3, AC-017-4
+  - **Implementation AC**:
+    - Given a config-loaded test command, when it fails the allow-list regex at load time, then it is rejected before any container is launched.
+    - Given the container attempts a write outside `/tmp/test-output` at runtime, when the escape is attempted, then the write fails because the repo mount is read-only.
+
+- [ ] **TRD-026b-TEST**: Verify Docker sandbox allow-list + read-only enforcement (1h) [verifies TRD-026b] [satisfies REQ-017]
+  - **Test AC**:
+    - Given a test command that does not match the allow-list, when the config loads, then the test tool refuses to run it.
+    - Given a container that tries to write to the repo mount, when the test completes, then the write attempt failed (read-only mount honored).
+
+- [ ] **TRD-027**: Retry wrapper for full-auto (2h) [satisfies REQ-022] [depends: TRD-025, TRD-026a]
+  - **Validates PRD ACs**: AC-022-1, AC-022-2
+  - **Implementation AC**:
+    - Given the lint+test block, when it fails, then `@with_retries(max=3)` retries up to three times.
+    - Given the final retry fails, when the wrapper surrenders, then the issue is labeled `human-review` via the GitHub client.
+
+- [ ] **TRD-027-TEST**: Verify retry wrapper for full-auto (1h) [verifies TRD-027] [satisfies REQ-022]
+  - **Test AC**:
+    - Given a lint+test block that always fails, when the retry wrapper runs, then exactly three attempts occur and no more.
+    - Given all three attempts fail, when the wrapper exits, then a mock verifies the `human-review` label was applied to the target issue.
+
+- [ ] **TRD-028**: Undo / rollback (3h) [satisfies REQ-019] [depends: TRD-023]
+  - **Validates PRD ACs**: AC-019-1, AC-019-2, AC-019-3
+  - **Implementation AC**:
+    - Given `undo_last_change()` is called, when the tool inspects `HEAD`, then it verifies the commit author matches the configured identity before acting.
+    - Given the current branch is the dynamically-detected default branch, when undo is attempted, then it is refused with `ON_DEFAULT_BRANCH_REFUSED`.
+
+- [ ] **TRD-028-TEST**: Verify undo / rollback (2h) [verifies TRD-028] [satisfies REQ-019]
+  - **Test AC**:
+    - Given a commit authored by someone other than the configured identity, when undo runs, then the operation refuses with a structured error.
+    - Given the checkout is on the default branch, when undo runs, then it is refused with `ON_DEFAULT_BRANCH_REFUSED` regardless of commit author.
 
 ### Cluster 6 — Polish (9h impl + 5h test)
 
-**TRD-029: Serial queue processor** `[3h]` `[satisfies REQ-012, REQ-024]` `[depends: TRD-006, TRD-016]`
-- **Validates PRD ACs**: AC-012-1, AC-012-2, AC-012-3
-- Orchestrator: pick next issue, set active, process to terminal state, advance; >10 items → warning.
-- Includes **pause-on-NETWORK_ERROR** behavior (preserve state; resume on next successful tool call).
-- `[verifies TRD-029]` `TRD-029-TEST` `[2h]`
+- [ ] **TRD-029**: Serial queue processor (3h) [satisfies REQ-012, REQ-024] [depends: TRD-006, TRD-016]
+  - **Validates PRD ACs**: AC-012-1, AC-012-2, AC-012-3
+  - **Implementation AC**:
+    - Given a queue of issues, when the orchestrator runs, then it processes one at a time to a terminal state, advancing only after completion; >10 items emits a warning.
+    - Given a `NETWORK_ERROR` is raised mid-issue, when the orchestrator catches it, then state is preserved and processing pauses until the next successful tool call.
 
-**TRD-030: Polling task** `[3h]` `[satisfies REQ-008]` `[depends: TRD-016, TRD-006]`
-- **Validates PRD ACs**: AC-008-1, AC-008-2, AC-008-3
-- `asyncio.create_task` loop sleeping `poll_interval_min * 60`s; swallows transient errors.
-- `[verifies TRD-030]` `TRD-030-TEST` `[1h]`
+- [ ] **TRD-029-TEST**: Verify serial queue processor (2h) [verifies TRD-029] [satisfies REQ-012, REQ-024]
+  - **Test AC**:
+    - Given a queue of 3 issues, when the orchestrator runs with only one succeeding at a time, then issues terminate serially in order.
+    - Given a mocked `NETWORK_ERROR` during issue processing, when the orchestrator handles it, then state is preserved and the queue resumes on the next successful call.
 
-**TRD-031: Network & rate-limit handling** `[2h]` `[satisfies REQ-024]` `[depends: TRD-015]`
-- **Validates PRD ACs**: AC-024-1, AC-024-2
-- Parse `X-RateLimit-Reset` → human-readable reset time.
-- `[verifies TRD-031]` `TRD-031-TEST` `[1h]`
+- [ ] **TRD-030**: Polling task (3h) [satisfies REQ-008] [depends: TRD-016, TRD-006]
+  - **Validates PRD ACs**: AC-008-1, AC-008-2, AC-008-3
+  - **Implementation AC**:
+    - Given `issue_agent_start`, when the polling task is created, then it loops using `asyncio.create_task` and sleeps `poll_interval_min * 60` seconds between iterations.
+    - Given a transient error during a poll, when the loop catches it, then the error is swallowed (logged) and the next tick continues normally.
 
-**TRD-032: Naming helpers** `[1h]` `[satisfies REQ-021]`
-- **Validates PRD ACs**: AC-021-1, AC-021-2
-- `slugify(title, max=40)`, `branch_name(n, title)`, `commit_msg(desc, n)`, `pr_title(title, n)`.
-- `[verifies TRD-032]` `TRD-032-TEST` `[1h]`
+- [ ] **TRD-030-TEST**: Verify polling task (1h) [verifies TRD-030] [satisfies REQ-008]
+  - **Test AC**:
+    - Given a polling interval of 5 minutes, when the task runs with mocked time, then each iteration sleeps 300s.
+    - Given a transient exception on one iteration, when the task continues, then it does not crash and proceeds to the next tick.
+
+- [ ] **TRD-031**: Network & rate-limit handling (2h) [satisfies REQ-024] [depends: TRD-015]
+  - **Validates PRD ACs**: AC-024-1, AC-024-2
+  - **Implementation AC**:
+    - Given a rate-limit response, when the handler parses `X-RateLimit-Reset`, then it produces a human-readable reset time string.
+    - Given a network error surface, when the handler classifies it, then it maps to the correct structured error code.
+
+- [ ] **TRD-031-TEST**: Verify network & rate-limit handling (1h) [verifies TRD-031] [satisfies REQ-024]
+  - **Test AC**:
+    - Given a mocked rate-limit response with known reset epoch, when the handler parses it, then the resulting human-readable string matches the expected formatted time.
+    - Given mocked connection errors, when the handler classifies them, then each maps to the correct structured error code.
+
+- [ ] **TRD-032**: Naming helpers (1h) [satisfies REQ-021]
+  - **Validates PRD ACs**: AC-021-1, AC-021-2
+  - **Implementation AC**:
+    - Given a title, when `slugify(title, max=40)` runs, then it produces a lowercase, dash-separated, ≤40-char slug.
+    - Given an issue number and a title, when `branch_name`, `commit_msg`, and `pr_title` run, then they produce strings matching the documented conventions.
+
+- [ ] **TRD-032-TEST**: Verify naming helpers (1h) [verifies TRD-032] [satisfies REQ-021]
+  - **Test AC**:
+    - Given sample titles with special characters and excess length, when `slugify` runs, then the output conforms to the length and character-set contract.
+    - Given an issue number and title, when all four helpers run, then each result matches the documented pattern (branch, commit, PR title).
 
 ### Cluster 7 — Docs & Packaging (7h impl + 1.5h test)
 
-**TRD-033: agent_protocol.md content** `[3h]` `[satisfies REQ-020, REQ-020b]`
-- **Validates PRD ACs**: AC-020-1, AC-020-2, AC-020b-1, AC-020b-2
-- Full semi+full workflow text; Step 0 conventions; placeholder vars.
-- `[verifies TRD-033]` `TRD-033-TEST` `[1h]` — placeholder coverage audit
+- [ ] **TRD-033**: agent_protocol.md content (3h) [satisfies REQ-020, REQ-020b]
+  - **Validates PRD ACs**: AC-020-1, AC-020-2, AC-020b-1, AC-020b-2
+  - **Implementation AC**:
+    - Given the agent protocol template, when authoring is complete, then it covers the full semi and full workflow text plus Step 0 conventions.
+    - Given the template contains placeholder vars, when the renderer (TRD-013) substitutes them, then every placeholder is resolvable from the documented variable set.
 
-**TRD-034: README.md** `[3h]` `[satisfies REQ-001]`
-- All 8 sections per PRD (Install, Quick Start, Commands, Modes, Token howto, Security, Troubleshooting).
-- `[verifies TRD-034]` `TRD-034-TEST` `[0.5h]` — section-presence audit via markdown parser
+- [ ] **TRD-033-TEST**: Verify agent_protocol.md content (1h) [verifies TRD-033] [satisfies REQ-020, REQ-020b]
+  - **Test AC**:
+    - Given the rendered template, when scanned for placeholders, then no unresolved `{{var}}` tokens remain.
+    - Given the documented variable set, when a coverage audit runs, then every placeholder in the template is present in the variable set (and vice versa).
 
-**TRD-035: Packaging** `[1h]`
-- `pyproject.toml` with entry-point, `.gitignore` (already drafted), `requirements.txt` (pinned).
-- `[satisfies INFRA]`
+- [ ] **TRD-034**: README.md (3h) [satisfies REQ-001]
+  - **Implementation AC**:
+    - Given the PRD's required sections, when README.md is authored, then it contains all 8 sections (Install, Quick Start, Commands, Modes, Token howto, Security, Troubleshooting, and the remaining PRD-mandated section).
+    - Given the README is written, when reviewed, then every section includes a working example or actionable instructions.
+
+- [ ] **TRD-034-TEST**: Verify README.md (0.5h) [verifies TRD-034] [satisfies REQ-001]
+  - **Test AC**:
+    - Given the README is parsed by a markdown parser, when a section-presence audit runs, then all 8 required section headings are present.
+    - Given code blocks in the README, when scanned, then each references a command or example that exists in the codebase.
+
+- [ ] **TRD-035**: Packaging (1h) [satisfies INFRA]
+  - **Implementation AC**:
+    - Given the project root, when packaging is complete, then `pyproject.toml` declares the console entry-point, `.gitignore` is present, and `requirements.txt` is pinned.
+    - Given the packaging files, when `pip install .` runs in a clean venv, then the entry-point command resolves.
 
 ### Infra
 
-**TRD-INFRA-01: asyncio app composition root** `[2h]` `[satisfies ARCH]`
-- `ghia/app.py` wires FastMCP + Starlette + SessionStore + polling; exposes `create_app()`.
-- `[verifies TRD-INFRA-01]` `TRD-INFRA-01-TEST` `[1h]`
+- [ ] **TRD-INFRA-01**: asyncio app composition root (2h) [satisfies ARCH]
+  - **Implementation AC**:
+    - Given `ghia/app.py`, when `create_app()` is invoked, then it wires FastMCP, Starlette, SessionStore, and the polling task into a single event loop composition.
+    - Given `create_app()` returns, when the app is started, then all subsystems share the same event loop and no subsystem is implicitly started before activation.
 
-**TRD-INFRA-02: Playwright test harness** `[1h]` `[satisfies ARCH]`
-- Playwright install + fixture launcher for `picker.html` tests.
+- [ ] **TRD-INFRA-01-TEST**: Verify asyncio app composition root (1h) [verifies TRD-INFRA-01] [satisfies ARCH]
+  - **Test AC**:
+    - Given `create_app()` is called, when the returned app is inspected, then FastMCP, Starlette, and SessionStore handles are all reachable.
+    - Given the app is started in a test harness, when it is inspected, then no polling task exists until activation occurs explicitly.
+
+- [ ] **TRD-INFRA-02**: Playwright test harness (1h) [satisfies ARCH]
+  - **Implementation AC**:
+    - Given a developer runs the UI test setup, when the harness is installed, then Playwright and its browsers are available locally.
+    - Given the harness provides a fixture launcher for `picker.html`, when a test imports it, then the fixture serves `picker.html` and exposes a Playwright page context.
 
 ---
 
@@ -473,9 +695,9 @@ github-issue-agent/
 
 ---
 
-## 5b. Team Configuration
+## 5b. Recommended Team Assignments (advisory)
 
-> **Auto-generated by `/ensemble:configure-team` on 2026-04-23.** Review agent assignments below and edit if needed before running `/ensemble:implement-trd-beads`.
+> **Auto-generated by `/ensemble:configure-team` on 2026-04-23.** This section is ADVISORY — the project has no local `packages/*/agents/` registry, so team-mode strict validation is skipped. Implementation runs in single-agent mode; at runtime, specialist work is delegated manually via the `Task` tool to the globally-installed `ensemble-full:*` agents listed below.
 
 ### 5b.1 Complexity Metrics
 | Metric | Value |
