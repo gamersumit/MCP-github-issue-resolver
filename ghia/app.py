@@ -14,6 +14,7 @@ lazily off ``app`` when those clusters land.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,11 @@ class GhiaApp:
     logger: logging.Logger = field(
         default_factory=lambda: logging.getLogger("ghia")
     )
+    # Background polling handle.  Owned by ghia.polling — start_polling
+    # writes here, stop_polling clears it.  Declared on the dataclass
+    # so its lifetime is visible at the type level rather than a
+    # surprise attribute set at runtime.
+    _polling_task: Optional[asyncio.Task] = None
 
 
 def _default_session_path(repo_root: Path) -> Path:

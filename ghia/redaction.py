@@ -30,6 +30,7 @@ __all__ = [
     "set_token",
     "get_token",
     "install_filter",
+    "scrub",
 ]
 
 REDACTED = "***REDACTED***"
@@ -155,6 +156,24 @@ class RedactionFilter(logging.Filter):
         except Exception:  # noqa: BLE001 — redaction never breaks logging
             pass
         return True
+
+
+def scrub(text: str) -> str:
+    """Public, stateless scrubber for arbitrary strings.
+
+    Convenience wrapper that applies the full redaction policy (literal
+    + regex) using the currently-registered token.  Intended for non-log
+    surfaces like exception messages bubbling out of network helpers,
+    where we still need token safety but the logging filter chain is
+    not in play.
+
+    Non-string input is returned unchanged so callers can pass it the
+    output of ``str(exc)`` without first proving the type.
+    """
+
+    if not isinstance(text, str):
+        return text
+    return _scrub_text(text, get_token())
 
 
 def install_filter(logger: Optional[logging.Logger] = None) -> RedactionFilter:

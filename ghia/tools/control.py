@@ -25,6 +25,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from ghia import polling
 from ghia.app import GhiaApp
 from ghia.convention_scan import discover_conventions
 from ghia.errors import ErrorCode, ToolResponse, err, ok, wrap_tool
@@ -138,6 +139,12 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
         timestamp=_human_timestamp(now),
     )
 
+    # Start the background poller AFTER all state is persisted.  The
+    # polling task is the lone "ambient" piece of the agent — every
+    # other tool is request/response — so its lifecycle has to be
+    # bound tightly to start/stop or it will leak across sessions.
+    await polling.start_polling(app)
+
     preview = (discovered or "")[:200]
     return ok({
         "protocol": protocol,
@@ -162,6 +169,12 @@ async def issue_agent_stop(app: GhiaApp) -> ToolResponse:
     fields that only make sense while active (``active_issue``,
     ``poll_timer_active``, ``queue``) are cleared.
     """
+
+    # Cancel the poller BEFORE flipping status — otherwise a tick
+    # firing right as we transition could re-enter list_issues against
+    # a half-stopped session.  stop_polling is a no-op when no task is
+    # active, so calling it here is always safe.
+    await polling.stop_polling(app)
 
     async with app.session.lock:
         current = await app.session.read()
@@ -257,16 +270,29 @@ async def issue_agent_set_mode(app: GhiaApp, mode: str) -> ToolResponse:
 
 @wrap_tool
 async def issue_agent_fetch_now(app: GhiaApp) -> ToolResponse:
-    """STUB: real implementation lands with TRD-016/030 (Cluster 4/6).
+    """Trigger one polling tick out-of-band.
 
-    We return ok(...) rather than an error so the MCP surface is
-    stable from Sprint 1 onward — callers integrating against the
-    tool set can rely on the shape of the response without needing to
-    branch on "is fetch_now wired up yet".
+    Runs a single iteration of the polling work (fetch issues, update
+    ``last_fetched``) without disturbing the running poller.  Errors
+    inside the tick are caught here and surfaced as a structured
+    response — the goal is for the user to see WHY a manual refresh
+    failed, rather than the silent "WARNING in logs only" treatment
+    that the background loop applies.
     """
 
-    logger.info("fetch_now called; stub — issue fetching lands in Cluster 4")
+    try:
+        await polling._tick_once(app)
+    except Exception as exc:  # noqa: BLE001 — surface to the user, don't crash
+        logger.warning("fetch_now tick failed: %s", exc)
+        return err(
+            ErrorCode.NETWORK_ERROR,
+            f"fetch_now failed: {type(exc).__name__}: {exc}",
+        )
+
+    state = await app.session.read()
     return ok({
-        "message": "fetch_now stub — issue fetching lands in Cluster 4",
-        "fetched": 0,
+        "message": "fetch triggered",
+        "last_fetched": state.last_fetched.isoformat()
+        if state.last_fetched is not None
+        else None,
     })

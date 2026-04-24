@@ -42,6 +42,7 @@ from typing import Any, Optional
 from github import Auth, Github, GithubException
 
 from ghia.errors import ErrorCode
+from ghia.network import format_rate_limit_reset
 from ghia.redaction import install_filter, set_token
 
 logger = logging.getLogger(__name__)
@@ -159,13 +160,15 @@ def _map_exception(exc: GithubException) -> GitHubClientError:
         if _is_rate_limited(exc):
             reset_at = _parse_reset_at(headers)
             if reset_at is not None:
-                # Use a portable "YYYY-MM-DD HH:MM UTC" so logs and tool
-                # responses read the same on every machine.
-                when = reset_at.strftime("%Y-%m-%d %H:%M UTC")
-                msg = (
-                    f"GitHub rate limit exceeded; quota resets at {when}."
-                )
+                # Delegated to ghia.network so every rate-limit message
+                # in the codebase reads identically; passing the epoch
+                # (not the datetime) keeps the helper signature simple
+                # and re-usable for callers that only have raw headers.
+                detail = format_rate_limit_reset(int(reset_at.timestamp()))
+                msg = f"GitHub rate limit exceeded; {detail}."
             else:
+                # Preserve the "reset time unavailable" wording — the
+                # test suite pins it and downstream UIs key off it.
                 msg = "GitHub rate limit exceeded; reset time unavailable."
             return GitHubClientError(
                 ErrorCode.RATE_LIMITED, msg, reset_at=reset_at

@@ -1,13 +1,14 @@
 """Control-plane tests (TRD-011-TEST + TRD-012-TEST).
 
 Covers:
-* start from idle → status becomes active, protocol is non-empty
+* start from idle → status becomes active, protocol is non-empty,
+  polling task is created
 * start from active → INVALID_INPUT error
-* stop from active → status becomes idle
+* stop from active → status becomes idle, polling task is cancelled
 * set_mode("full") → SessionState.mode == "full"
 * set_mode("invalid") → INVALID_INPUT error
 * Mid-session: start → set_mode → status reflects new mode immediately
-* fetch_now stub returns ok with fetched=0
+* fetch_now triggers a tick and updates last_fetched
 * status returns structured SessionState echo
 """
 
@@ -15,12 +16,13 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 import pytest
 
-from ghia import redaction
+from ghia import polling, redaction
 from ghia.app import GhiaApp, create_app
 from ghia.errors import ErrorCode
 from ghia.tools import control
@@ -45,6 +47,25 @@ def _reset_logging_filters() -> None:
     redaction.set_token(None)
 
 
+@pytest.fixture(autouse=True)
+def _stub_polling_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace ``polling._tick_once`` with a no-network stub.
+
+    Without this, every ``issue_agent_start`` would spawn a polling
+    task that immediately tries to hit api.github.com via PyGithub.
+    The stub keeps the lifecycle wiring honest (start_polling and
+    stop_polling still run) without making the test suite
+    network-dependent.
+    """
+
+    async def _no_network(app: GhiaApp) -> None:
+        await app.session.update(
+            last_fetched=datetime.now(tz=timezone.utc)
+        )
+
+    monkeypatch.setattr(polling, "_tick_once", _no_network)
+
+
 def _write_config(path: Path, **overrides: Any) -> None:
     payload: dict[str, Any] = {
         "token": "ghp_" + "c" * 36,
@@ -59,14 +80,23 @@ def _write_config(path: Path, **overrides: Any) -> None:
 
 
 @pytest.fixture
-async def app(tmp_path: Path) -> GhiaApp:
-    """A fully-wired GhiaApp rooted at ``tmp_path``."""
+async def app(tmp_path: Path) -> AsyncIterator[GhiaApp]:
+    """A fully-wired GhiaApp rooted at ``tmp_path``.
+
+    Tears down any background polling task on exit so a test that
+    starts the agent doesn't leak a poller into the next test's event
+    loop.
+    """
 
     cfg_path = tmp_path / "cfg.json"
     _write_config(cfg_path)
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    return await create_app(repo_root=repo_root, config_path=cfg_path)
+    instance = await create_app(repo_root=repo_root, config_path=cfg_path)
+    try:
+        yield instance
+    finally:
+        await polling.stop_polling(instance)
 
 
 # ----------------------------------------------------------------------
@@ -126,6 +156,36 @@ async def test_stop_from_idle_is_safe(app: GhiaApp) -> None:
     assert resp.success
     state = await app.session.read()
     assert state.status == "idle"
+
+
+async def test_start_creates_polling_task(app: GhiaApp) -> None:
+    """issue_agent_start spawns the background poller."""
+
+    assert app._polling_task is None
+    resp = await control.issue_agent_start(app)
+    assert resp.success
+
+    assert app._polling_task is not None
+    assert not app._polling_task.done()
+
+    state = await app.session.read()
+    assert state.poll_timer_active is True
+
+
+async def test_stop_cancels_polling_task(app: GhiaApp) -> None:
+    """issue_agent_stop cancels the poller and clears the handle."""
+
+    await control.issue_agent_start(app)
+    task = app._polling_task
+    assert task is not None
+
+    resp = await control.issue_agent_stop(app)
+    assert resp.success
+    assert app._polling_task is None
+    assert task.done()  # cancelled and awaited
+
+    state = await app.session.read()
+    assert state.poll_timer_active is False
 
 
 # ----------------------------------------------------------------------
@@ -214,11 +274,16 @@ async def test_mid_session_mode_change_visible_immediately(app: GhiaApp) -> None
 # ----------------------------------------------------------------------
 
 
-async def test_fetch_now_stub_returns_ok(app: GhiaApp) -> None:
+async def test_fetch_now_triggers_tick(app: GhiaApp) -> None:
+    """fetch_now runs one polling tick and updates last_fetched."""
+
     resp = await control.issue_agent_fetch_now(app)
-    assert resp.success
-    assert resp.data["fetched"] == 0
-    assert "stub" in resp.data["message"].lower()
+    assert resp.success, resp.error
+    # last_fetched is populated by the (stubbed) tick.
+    assert resp.data["last_fetched"] is not None
+
+    state = await app.session.read()
+    assert state.last_fetched is not None
 
 
 # ----------------------------------------------------------------------
@@ -262,9 +327,14 @@ async def test_start_includes_discovered_conventions_preview(
     )
 
     app = await create_app(repo_root=repo_root, config_path=cfg_path)
-    resp = await control.issue_agent_start(app)
-    assert resp.success
-    preview: str = resp.data["discovered_conventions_preview"]
-    assert "Be concise" in preview or "Rules" in preview
-    # Preview is capped at 200 chars.
-    assert len(preview) <= 200
+    try:
+        resp = await control.issue_agent_start(app)
+        assert resp.success
+        preview: str = resp.data["discovered_conventions_preview"]
+        assert "Be concise" in preview or "Rules" in preview
+        # Preview is capped at 200 chars.
+        assert len(preview) <= 200
+    finally:
+        # Tear the poller down — the inline app skips the autouse fixture's
+        # cleanup hook because it builds its own GhiaApp.
+        await polling.stop_polling(app)
