@@ -302,6 +302,107 @@ async def test_auth_status_logged_in_without_active_marker(
     assert status["active_account"] == "legacyuser"
 
 
+# --- Regression coverage for the gh-2.4 / legacy-format bug ----------------
+
+
+async def test_auth_status_legacy_format_on_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """gh 2.4 (Ubuntu LTS) writes the body to STDERR using ``as <login>``.
+
+    Verbatim capture of ``gh auth status 2>&1`` from the user's machine
+    that originally tripped this bug.  The previous parser only matched
+    the modern ``account <login>`` keyword AND only consulted stdout, so
+    it returned authenticated=False on a perfectly-authenticated install
+    and the wizard told the user to ``gh auth login`` even though gh
+    confirmed they were already logged in.
+    """
+
+    real_legacy_stderr = (
+        "github.com\n"
+        "  ✓ Logged in to github.com as sumittechsage "
+        "(/home/sumit/.config/gh/hosts.yml)\n"
+        "  ✓ Git operations for github.com configured to use https protocol.\n"
+        "  ✓ Token: *******************\n"
+        "  \n"
+    )
+    # Explicitly empty stdout — the body is on stderr only, which is
+    # the exact configuration that broke the old parser.
+    _patch_run_gh(
+        monkeypatch,
+        _completed(rc=0, stdout="", stderr=real_legacy_stderr),
+    )
+
+    status = await gh_cli.auth_status()
+    assert status["authenticated"] is True
+    assert status["active_account"] == "sumittechsage"
+    assert status["hostname"] == "github.com"
+
+
+async def test_auth_status_legacy_format_with_oauth_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other legacy variant: ``as <user> (oauth_token)`` on stderr."""
+
+    text = (
+        "github.com\n"
+        "  ✓ Logged in to github.com as octocat (oauth_token)\n"
+        "  ✓ Git operations for github.com configured to use ssh protocol.\n"
+        "  ✓ Token: *******************\n"
+    )
+    _patch_run_gh(monkeypatch, _completed(rc=0, stdout="", stderr=text))
+
+    status = await gh_cli.auth_status()
+    assert status["authenticated"] is True
+    assert status["active_account"] == "octocat"
+
+
+async def test_auth_status_unauthenticated_legacy_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """gh 2.4's not-logged-in message lands on stderr with rc=1."""
+
+    _patch_run_gh(
+        monkeypatch,
+        _completed(
+            rc=1,
+            stdout="",
+            stderr=(
+                "You are not logged into any GitHub hosts. "
+                "Run gh auth login to authenticate.\n"
+            ),
+        ),
+    )
+    status = await gh_cli.auth_status()
+    assert status["authenticated"] is False
+    assert status["active_account"] is None
+    assert status["hostname"] == "github.com"
+
+
+async def test_auth_status_modern_multi_account_with_legacy_block_mixed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive: a setup where one block uses ``as`` and one uses ``account``.
+
+    Shouldn't happen in practice (a single gh version emits one form),
+    but we want the regex to handle both keywords in the same parse so
+    the active-block selector doesn't silently skip a legacy entry.
+    """
+
+    text = (
+        "github.com\n"
+        "  ✓ Logged in to github.com as inactiveuser (oauth_token)\n"
+        "  - Active account: false\n"
+        "  ✓ Logged in to github.com account winner (keyring)\n"
+        "  - Active account: true\n"
+    )
+    _patch_run_gh(monkeypatch, _completed(stdout=text))
+
+    status = await gh_cli.auth_status()
+    assert status["authenticated"] is True
+    assert status["active_account"] == "winner"
+
+
 # ----------------------------------------------------------------------
 # create_pull_request
 # ----------------------------------------------------------------------

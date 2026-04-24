@@ -306,7 +306,20 @@ async def main() -> int:
         return 4
 
     active_account = status["active_account"]
-    console.print(f"[bold]Active gh account:[/bold] {active_account}")
+    # Edge case: gh is authenticated but the parser couldn't pick a login
+    # out of the auth-status text (unfamiliar gh build, exotic locale,
+    # color codes that defeated the regex).  Don't block the user — gh
+    # itself confirmed they're logged in, so proceed with a warning and
+    # let the subsequent ``repo_view`` call be the real authority on
+    # whether the active account can do what we need.
+    if active_account is None:
+        console.print(
+            "[yellow]`gh` is authenticated but the active account name "
+            "could not be parsed from `gh auth status` output.[/yellow]\n"
+            "[yellow]Continuing — repo access will be verified next.[/yellow]"
+        )
+    else:
+        console.print(f"[bold]Active gh account:[/bold] {active_account}")
 
     # Step 5: verify the active account can actually see the repo.
     # The error path here is the most common "oh I'm logged in but

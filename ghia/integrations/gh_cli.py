@@ -450,24 +450,51 @@ async def auth_status() -> dict[str, Any]:
 
     Parses ``gh auth status --hostname github.com`` text output.  gh
     doesn't expose a JSON variant for auth-status, so we live with the
-    text format — which is stable enough across versions to match on.
+    text format — which has shifted across versions:
 
-    Output shape we look for (gh ≥ 2.0):
+    Legacy (gh ≤ 2.39, e.g. 2.4.0 on Ubuntu LTS) writes to **stderr**:
 
         github.com
-          ✓ Logged in to github.com account <login> (...)
-          - Active account: true
-          ...
+          ✓ Logged in to github.com as <login> (/path/to/hosts.yml)
+          ✓ Git operations for github.com configured to use https protocol.
+          ✓ Token: *******************
 
-    When multiple accounts are configured, only the one tagged
-    ``Active account: true`` is returned.  When no account is active,
-    ``authenticated`` is False and ``active_account`` is None.
+    Modern (gh ≥ 2.40) writes to either stdout or stderr depending on
+    the build, and uses a different keyword + an explicit Active marker
+    when multiple accounts are configured:
+
+        github.com
+          ✓ Logged in to github.com account <login> (keyring)
+          - Active account: true
+          - Git operations protocol: ssh
+
+    The bug we're fixing: this parser used to only match the modern
+    ``account <login>`` form AND only read stdout, so on a perfectly-
+    authenticated gh 2.4 install it returned authenticated=False — the
+    wizard then told the user to ``gh auth login`` even though gh said
+    they were already logged in.  Fix:
+      1. Concatenate stdout + stderr before parsing (legacy gh writes
+         the body to stderr; modern gh varies).
+      2. Match BOTH ``Logged in to <host> as <login>`` (legacy) and
+         ``Logged in to <host> account <login>`` (modern) in one regex.
+      3. Treat any successful match as the auth signal — don't gate on
+         exit code (gh has historically exited 0 even when no account
+         was active on some 2.x builds).
+
+    When multiple accounts are configured, the one tagged
+    ``Active account: true`` wins; otherwise we fall back to the first
+    logged-in block.  When no account is logged in, ``authenticated``
+    is False and ``active_account`` is None.
     """
 
     proc = await _run_gh(["gh", "auth", "status", "--hostname", "github.com"])
     # ``gh auth status`` returns rc=1 when not authenticated, so we
     # don't blanket-_ensure_ok here — the unauth case is a normal
     # answer to the question, not an error to raise on.
+    #
+    # Read BOTH streams: gh 2.4 writes the status body to stderr while
+    # modern gh varies.  Concatenating before parsing means the regex
+    # below sees the body regardless of which stream carried it.
     text = (proc.stdout or "") + "\n" + (proc.stderr or "")
 
     # The "Active account" marker is gh's way of disambiguating in
@@ -516,7 +543,16 @@ def _split_account_blocks(text: str) -> list[str]:
     return ["\n".join(b) for b in blocks]
 
 
-_ACCOUNT_RE = re.compile(r"account\s+([A-Za-z0-9][A-Za-z0-9-]*)")
+# Multi-format support: gh ≤ 2.39 emits "Logged in to github.com as <login>"
+# while gh ≥ 2.40 emits "Logged in to github.com account <login>".  The
+# `(?:as|account)` alternation matches both without a second pass, and the
+# leading "Logged in to <host> " prefix prevents accidentally picking up
+# the word "account" elsewhere in the block (e.g. "Active account: true").
+# GitHub usernames are 1-39 chars from [A-Za-z0-9-] (no leading hyphen),
+# matching gh's own validation.
+_LOGIN_RE = re.compile(
+    r"Logged in to \S+ (?:as|account) ([A-Za-z0-9][A-Za-z0-9-]*)"
+)
 
 
 def _pick_active_block(blocks: list[str]) -> Optional[str]:
@@ -524,7 +560,7 @@ def _pick_active_block(blocks: list[str]) -> Optional[str]:
 
     for block in blocks:
         if re.search(r"Active account:\s*true", block, re.IGNORECASE):
-            m = _ACCOUNT_RE.search(block)
+            m = _LOGIN_RE.search(block)
             if m:
                 return m.group(1)
     return None
@@ -534,7 +570,7 @@ def _pick_first_logged_in_block(blocks: list[str]) -> Optional[str]:
     """Return the first block's login as a fallback for single-account setups."""
 
     for block in blocks:
-        m = _ACCOUNT_RE.search(block)
+        m = _LOGIN_RE.search(block)
         if m:
             return m.group(1)
     return None
