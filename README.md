@@ -13,11 +13,11 @@ Drops into Claude Code as a local Model Context Protocol (MCP) server, stays idl
 | Sprint 1a — Foundation (TRD-001..006) | error types, token redaction, atomic writes, path guards, config, session state | ✅ **Shipped** |
 | Sprint 1b — Core Control (TRD-011..014, TRD-033) | MCP bootstrap, control tools, protocol renderer, convention discovery | ✅ **Shipped** |
 | Sprint 2 — Setup wizard + GitHub client | install.sh, wizard, token validation, issue fetching | ✅ **Shipped — wizard, token validation, auto-detection landed.** |
-| Sprint 3 — Picker UI + duplicate detection | browser UI, terminal fallback, duplicate-PR checks | ⏳ Pending |
+| Sprint 3 — Picker UI + duplicate detection | browser UI, terminal fallback, duplicate-PR checks | ✅ **Shipped — Starlette picker on `127.0.0.1:4242`, `rich` terminal fallback, headless auto-detection.** |
 | Sprint 4 — Code & Git ops | filesystem tools, git CLI wrapper, PR creation, Docker-sandboxed tests, undo | ⏳ Pending |
 | Sprint 5 — Polish & ship | serial queue, polling timer, README polish, packaging | ⏳ Pending |
 
-**What runs today:** `ghia/` package (foundation + control tools + protocol renderer + setup wizard + token validator + test/lint auto-detection + command allow-list), tested with 201 passing tests. `server.py` registers with FastMCP, `/issue-agent start/stop/status/set_mode/fetch_now` are callable. Installation is a one-command `bash install.sh` that creates a venv, installs deps, runs the interactive wizard, and registers the MCP server with Claude Code. Issue-fetching / code-writing / PR creation are still stubs until Clusters 4/5.
+**What runs today:** `ghia/` package (foundation + control tools + protocol renderer + setup wizard + token validator + test/lint auto-detection + command allow-list + GitHub client + issue tools + browser/terminal picker UI), tested with 282 passing tests. `server.py` registers with FastMCP, `/issue-agent start/stop/status/set_mode/fetch_now` are callable. The picker UI lives at `ui_static/picker.html` and is served by a Starlette sub-app bound to `127.0.0.1:4242`; headless environments transparently fall back to a `rich` terminal table. Installation is a one-command `bash install.sh` that creates a venv, installs deps, runs the interactive wizard, and registers the MCP server with Claude Code. Code-writing / PR creation are still stubs until Cluster 5.
 
 See `docs/PRD/PRD-2026-001-github-issue-agent.md` and `docs/TRD/TRD-2026-001-github-issue-agent.md` for the full specification and technical design.
 
@@ -125,7 +125,7 @@ Tools pending from later sprints: `list_issues`, `get_issue`, `pick_issues`, `sk
 python -m pytest tests/ -v
 ```
 
-201 tests today, < 7 seconds runtime. Coverage target is ≥ 80% (enforced at sprint exit).
+282 tests today, < 7 seconds runtime. Coverage target is ≥ 80% (enforced at sprint exit).
 
 ### Run a single test module
 
@@ -171,9 +171,16 @@ github-issue-agent/
 │   ├── convention_scan.py    ← CLAUDE.md / CONTRIBUTING.md discovery
 │   ├── detection.py          ← test-runner / linter auto-detection (TRD-009)
 │   ├── github_client_light.py← minimal httpx client for setup-time probes (TRD-008)
-│   └── tools/
-│       ├── control.py        ← start/stop/status/set_mode/fetch_now
-│       └── validation.py     ← command allow-list (TRD-008, AC-017-3)
+│   ├── tools/
+│   │   ├── control.py        ← start/stop/status/set_mode/fetch_now
+│   │   ├── issues.py         ← list/get/pick/skip/post-comment/dup-check (TRD-016/017)
+│   │   └── validation.py     ← command allow-list (TRD-008, AC-017-3)
+│   └── ui/                   ← picker subsystem (TRD-018..021)
+│       ├── server.py         ← Starlette sub-app on 127.0.0.1:4242
+│       ├── terminal.py       ← `rich` fallback for headless / SSH
+│       └── opener.py         ← headless detection + browser orchestrator
+├── ui_static/
+│   └── picker.html           ← self-contained picker UI (no CDN deps)
 ├── prompts/
 │   └── agent_protocol.md     ← injected into Claude on start
 ├── tests/                    ← pytest + pytest-asyncio (201 tests)
