@@ -19,21 +19,43 @@ Drops into Claude Code as a local Model Context Protocol (MCP) server, stays idl
 
 **479 tests** pass in ~19s. Coverage is enforced ≥ 80% at sprint exit. All MCP tools listed below are wired and reachable from Claude Code.
 
-> **v0.2 breaking change.** PAT-based config is gone — auth now flows through your existing `gh` CLI session, repos are auto-detected from `git remote get-url origin`, and config is per-repo (`~/.config/github-issue-agent/repos/<owner>__<name>.json`). If you upgraded from v0.1, your old `~/.config/github-issue-agent/config.json` is ignored — run `python -m setup_wizard` once per repo to migrate.
+> **v0.2 breaking change.** PAT-based config is gone — auth now flows through your existing `gh` CLI session, repos are auto-detected from `git remote get-url origin`, and config is per-repo (`~/.config/github-issue-agent/repos/<owner>__<name>.json`). If you upgraded from v0.1, your old `~/.config/github-issue-agent/config.json` is ignored — run `github-issue-agent-setup` once per repo to migrate.
 
 See `docs/PRD/PRD-2026-001-github-issue-agent.md` and `docs/TRD/TRD-2026-001-github-issue-agent.md` for the full specification and technical design.
 
 ---
 
+## Where to run what
+
+The setup splits into three ceremonies — each has a fixed place to run and a fixed frequency. Following the table avoids the v0.1 surprise of "I ran the wizard inside the AGENT'S clone and now it's mis-configured".
+
+| Ceremony | Where to run | Frequency | Purpose |
+|---|---|---|---|
+| `bash install.sh` | Inside the agent clone dir | ONCE per machine | Install deps, register MCP at USER scope (works in every project) |
+| `github-issue-agent-setup` | Inside ANY target repo | Once per target repo | Detect repo + active gh account, write per-repo config |
+| `/mcp__github-issue-agent__start` (or natural language) | Inside target repo, in Claude Code | Each session | Run the agent |
+
+You should NEVER need to remember the agent's venv path, run the wizard inside the agent's own clone, or re-register the MCP per project.
+
+---
+
 ## Install
 
+> **Once per machine.** Clones the agent, builds its venv, registers the MCP at user scope.
+
 ```bash
-git clone <this-repo> github-issue-agent
-cd github-issue-agent
+git clone https://github.com/gamersumit/MCP-github-issue-resolver.git ~/tools/github-issue-agent
+cd ~/tools/github-issue-agent
 bash install.sh
 ```
 
-That's it. The installer is idempotent — re-running it upgrades dependencies and re-enters the wizard with your current config values pre-filled (ENTER accepts each one, type a new value to change it).
+What this does:
+
+- Creates a venv and installs deps
+- Registers the MCP server with Claude Code at **user** scope (so it works in every project, not just the clone dir)
+- Installs two console scripts: `github-issue-agent` (the MCP server) and `github-issue-agent-setup` (the per-repo wizard)
+
+The installer is idempotent — re-running it on a machine that already has the MCP registered detects the existing registration and fixes the scope if needed.
 
 ### Prerequisites
 
@@ -43,33 +65,43 @@ That's it. The installer is idempotent — re-running it upgrades dependencies a
 - **Claude Code** CLI — [install guide](https://docs.claude.com/en/docs/claude-code) — for MCP registration
 - **Docker** — optional but required for `run_tests` (sandboxed test execution); `run_tests` returns `DOCKER_UNAVAILABLE` with install hint when the daemon is unreachable
 
-### What the installer does
+---
 
-1. Verifies Python ≥ 3.10
-2. Creates `./.venv` (or reuses an existing one)
-3. `pip install -r requirements.txt` and `pip install -e .` (editable so source edits take effect immediately)
-4. Runs `python -m setup_wizard` interactively — auto-detects the repo from `git remote get-url origin`, verifies your active `gh` account can see it, then collects label, mode, poll interval, test/lint commands. **No token prompt** — the wizard reuses your existing `gh` auth.
-5. Best-effort `claude mcp add github-issue-agent -- $VENV/bin/python -m server` so the `/issue-agent ...` slash commands appear in Claude Code
+## Per-repo setup (once per repo you want the agent to handle)
 
-If `claude` is not on `$PATH`, the installer prints the exact registration command you can run later.
+```bash
+cd ~/path/to/your/target-repo
+github-issue-agent-setup
+```
+
+What this does:
+
+- Auto-detects the repo from `git remote get-url origin`
+- Verifies your `gh` CLI is authenticated and the active account can see the repo
+- Saves config to `~/.config/github-issue-agent/repos/<owner>__<name>.json`
+- **Never** prompts for a token — it inherits your `gh` CLI auth
+
+To swap accounts before running the wizard (e.g. you're working on a repo owned by a different GitHub user), use `gh auth switch -u <other-account>` first.
 
 ---
 
-## Quick Start
+## Use it (each time, from inside the target repo)
 
 ```bash
-# One-time per machine (skip if you already use gh)
-gh auth login --hostname github.com
-
-# One-time per repo
-cd /path/to/your/repo
-python -m setup_wizard
+cd ~/path/to/your/target-repo
+claude
 ```
 
-Then open Claude Code in the repo dir and type:
+Then in Claude Code, either:
 
 ```
-/issue-agent start
+/mcp__github-issue-agent__start
+```
+
+or just say:
+
+```
+start the issue agent
 ```
 
 Happy path you'll see:
@@ -89,10 +121,31 @@ Happy path you'll see:
 When you want to step away:
 
 ```
-/issue-agent stop
+/mcp__github-issue-agent__stop
 ```
 
 This pauses the agent — the queue, completed/skipped counters, and conventions summary all survive across `start` calls.
+
+---
+
+## Quick Start
+
+```bash
+# Once per machine
+gh auth login --hostname github.com
+
+# Once per target repo
+cd /path/to/your/repo
+github-issue-agent-setup
+```
+
+Then open Claude Code in the repo dir and either type the slash command:
+
+```
+/mcp__github-issue-agent__start
+```
+
+…or just say `start the issue agent` in natural language.
 
 ---
 
@@ -100,13 +153,15 @@ This pauses the agent — the queue, completed/skipped counters, and conventions
 
 ### MCP tools (registered with FastMCP, callable from Claude Code)
 
+Slash commands take the form `/mcp__github-issue-agent__<name>` — Claude Code generates this naming pattern automatically from each registered FastMCP prompt. You can also drive every tool below in natural language ("show issue-agent status", "switch to full mode", etc.).
+
 | Slash command | Tool name | What it does |
 |---|---|---|
-| `/issue-agent start` | `issue_agent_start` | Activates agent, runs Step 0 (convention discovery), injects workflow protocol, kicks off polling timer. |
-| `/issue-agent stop` | `issue_agent_stop` | Pauses agent, cancels polling task, preserves session state. |
-| `/issue-agent status` | `issue_agent_status` | Returns full `SessionState` + human-readable summary (mode, queue depth, last-fetch timestamp). |
-| `/issue-agent set_mode` | `issue_agent_set_mode` | Switches between `"semi"` and `"full"`. Takes effect **immediately** at the next decision point — in-flight work is preserved. |
-| `/issue-agent fetch_now` | `issue_agent_fetch_now` | Force an immediate issue refresh, bypassing the poll interval. |
+| `/mcp__github-issue-agent__start` | `issue_agent_start` | Activates agent, runs Step 0 (convention discovery), injects workflow protocol, kicks off polling timer. |
+| `/mcp__github-issue-agent__stop` | `issue_agent_stop` | Pauses agent, cancels polling task, preserves session state. |
+| `/mcp__github-issue-agent__status` | `issue_agent_status` | Returns full `SessionState` + human-readable summary (mode, queue depth, last-fetch timestamp). |
+| `/mcp__github-issue-agent__set_mode <semi\|full>` | `issue_agent_set_mode` | Switches between `"semi"` and `"full"`. Takes effect **immediately** at the next decision point — in-flight work is preserved. |
+| `/mcp__github-issue-agent__fetch_now` | `issue_agent_fetch_now` | Force an immediate issue refresh, bypassing the poll interval. |
 
 Internal tools the protocol drives (Claude calls these automatically — you don't type them):
 
@@ -116,8 +171,7 @@ Internal tools the protocol drives (Claude calls these automatically — you don
 
 ```bash
 cd /path/to/your/repo
-source .venv/bin/activate
-python -m setup_wizard
+github-issue-agent-setup
 ```
 
 Run from the repo directory any time you want to change the label, switch default mode, adjust the poll interval, or override the auto-detected test/lint commands. The wizard:
@@ -126,13 +180,13 @@ Run from the repo directory any time you want to change the label, switch defaul
 2. Confirms your active `gh` account can see it
 3. Reads any existing per-repo config and pre-fills every prompt — ENTER accepts the current value
 
-To swap accounts (e.g. you're working on a repo owned by a different GitHub user), use `gh auth switch -u <other-account>` first; the very next `setup_wizard` run (and every subsequent agent call) uses the new account automatically.
+To swap accounts (e.g. you're working on a repo owned by a different GitHub user), use `gh auth switch -u <other-account>` first; the very next `github-issue-agent-setup` run (and every subsequent agent call) uses the new account automatically.
 
 ---
 
 ## Modes
 
-You can be in exactly one mode at a time. Switch mid-session with `/issue-agent set_mode semi` or `/issue-agent set_mode full`.
+You can be in exactly one mode at a time. Switch mid-session with `/mcp__github-issue-agent__set_mode semi` or `/mcp__github-issue-agent__set_mode full` (or just say "switch to full mode").
 
 | Aspect | `semi` (default) | `full` |
 |---|---|---|
@@ -179,7 +233,7 @@ gh auth status                          # shows both, marks one as Active
 gh auth switch -u work-account          # set the active account
 ```
 
-Then `python -m setup_wizard` from the repo dir picks up the active account automatically. **Each repo gets its own config file** at `~/.config/github-issue-agent/repos/<owner>__<name>.json`, so a personal repo's config never collides with a work repo's, and the agent will use the right account for whichever repo you're sitting in.
+Then `github-issue-agent-setup` from the repo dir picks up the active account automatically. **Each repo gets its own config file** at `~/.config/github-issue-agent/repos/<owner>__<name>.json`, so a personal repo's config never collides with a work repo's, and the agent will use the right account for whichever repo you're sitting in.
 
 ### Wizard validation
 
@@ -241,7 +295,7 @@ Save as `~/.config/github-issue-agent/repos/<owner>__<name>.json`, then `chmod 6
 
 **`{success: false, code: "CONFIG_MISSING"}`**
 `~/.config/github-issue-agent/repos/<owner>__<name>.json` is missing or unreadable for this repo.
-Fix: `cd` into the repo, then `source .venv/bin/activate && python -m setup_wizard`.
+Fix: `cd` into the repo, then `github-issue-agent-setup` (the console script installed by `bash install.sh`).
 
 **`{success: false, code: "TOKEN_INVALID"}`**
 `gh` is not authenticated, or the active account's credential expired.
@@ -273,18 +327,19 @@ Fix: `git create_branch` to a `fix/issue-{n}-{slug}` branch first. The protocol 
 
 **Picker page loads but issue list is blank**
 Either the configured label has no open issues, or the GitHub fetch failed silently.
-Fix: check `/issue-agent status` for the last-fetch timestamp and any error code; force a refresh with `/issue-agent fetch_now`; verify the label exists on the repo (case-sensitive).
+Fix: check `/mcp__github-issue-agent__status` for the last-fetch timestamp and any error code; force a refresh with `/mcp__github-issue-agent__fetch_now`; verify the label exists on the repo (case-sensitive).
 
 **Polling timer is not firing**
 The polling task only runs while the agent is `started`. Stopping cancels it.
-Fix: `/issue-agent status` — if `state` is `idle`, run `/issue-agent start`. If polling is running but no fetches happen, check the configured `poll_interval_min` (minimum 5).
+Fix: `/mcp__github-issue-agent__status` — if `state` is `idle`, run `/mcp__github-issue-agent__start`. If polling is running but no fetches happen, check the configured `poll_interval_min` (minimum 5).
 
 **`session.json.bak-{timestamp}` appears in `state/`**
 Your session file got corrupted (typically a SIGKILL mid-write or a disk issue) and was auto-rotated so the agent could start cleanly. Safe to delete once you've confirmed nothing was in-flight.
 
-**`claude mcp add github-issue-agent` fails**
-The interpreter path needs to point at the venv's python.
-Fix: `claude mcp add github-issue-agent -- /full/path/to/.venv/bin/python -m server`
+**`claude mcp add github-issue-agent` fails or the slash command is missing in other repos**
+Either the registration didn't run (claude CLI wasn't on PATH at install time) or it landed at the default `local` scope, which only works inside one project dir.
+Fix: re-register at user scope so every project sees it. Point the interpreter at the agent's venv python:
+`claude mcp add -s user github-issue-agent -- /full/path/to/.venv/bin/python -m server`
 
 **Logs contain `***REDACTED***`**
 That's the token redaction filter doing its job. If you ever see an unredacted token in stdout, an error message, or a file on disk, **that's a bug** — please file a security issue.

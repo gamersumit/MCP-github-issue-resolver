@@ -46,6 +46,11 @@ dev = [
 
 [project.scripts]
 github-issue-agent = "server:main"
+# The wizard ships as a separate binary so the user runs it from inside
+# any target repo dir without needing to know the agent venv path. Pairs
+# with the user-scope MCP registration done by install.sh: install.sh
+# runs ONCE per machine, github-issue-agent-setup runs ONCE per repo.
+github-issue-agent-setup = "setup_wizard:main"
 
 [tool.setuptools.packages.find]
 include = ["ghia*"]

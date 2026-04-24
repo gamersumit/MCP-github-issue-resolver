@@ -32,7 +32,7 @@ from fastmcp import FastMCP
 from ghia.app import GhiaApp, create_app
 from ghia.config import ConfigMissingError
 from ghia.errors import ErrorCode, ToolResponse, err
-from ghia.repo_detect import RepoDetectionError
+from ghia.repo_detect import RepoDetectionError, detect_repo
 from ghia.tools import control
 
 logger = logging.getLogger(__name__)
@@ -72,10 +72,25 @@ async def _get_app_or_error() -> tuple[Optional[GhiaApp], Optional[ToolResponse]
             return None, err(ErrorCode.INVALID_INPUT, str(exc))
         except ConfigMissingError as exc:
             logger.info("create_app failed: %s", exc)
+            # Resolve the actual repo name so the error message is
+            # actionable ("run wizard for THIS repo") instead of generic
+            # ("run wizard somewhere"). Detection can fail independently
+            # (e.g. cwd briefly stopped being a repo between create_app
+            # and here), so we wrap it; on failure we fall back to a
+            # generic but still command-correct hint.
+            try:
+                owner, name = detect_repo(Path.cwd())
+                repo_label = f"{owner}/{name}"
+            except RepoDetectionError:
+                repo_label = "this repo"
             return None, err(
                 ErrorCode.CONFIG_MISSING,
-                "No per-repo config for this repo. "
-                "Run `python -m setup_wizard` from the repo dir to create one.",
+                (
+                    f"No config for this repo ({repo_label}) yet.\n\n"
+                    "Run this in your terminal from the repo dir:\n"
+                    "  github-issue-agent-setup\n\n"
+                    "Then ask me to start the agent again."
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("unexpected error initializing app")
@@ -142,6 +157,70 @@ async def issue_agent_fetch_now() -> dict[str, Any]:
     if error is not None:
         return _dump(error)
     return _dump(await control.issue_agent_fetch_now(app))
+
+
+# ----------------------------------------------------------------------
+# Prompt registrations — make /mcp__github-issue-agent__<name> work
+# ----------------------------------------------------------------------
+#
+# Why prompts on top of tools: Claude Code surfaces every registered
+# FastMCP prompt as a literal slash command of the form
+# ``/mcp__<server>__<prompt>``. Tools are NOT exposed as slash commands —
+# the user can only invoke them via natural language or by an LLM
+# decision. v0.1 documented `/issue-agent start` everywhere but never
+# registered a prompt, so the slash command silently 404'd ("Unknown
+# command"). These five thin pass-through prompts fix that without
+# changing tool behaviour: each prompt returns a one-line instruction
+# telling the LLM to call the matching tool. The tool layer remains the
+# single source of truth for actual work.
+
+
+@mcp.prompt()
+def start() -> str:
+    """Slash command shim → drives ``issue_agent_start``."""
+
+    return "Call the `issue_agent_start` tool now."
+
+
+@mcp.prompt()
+def stop() -> str:
+    """Slash command shim → drives ``issue_agent_stop``."""
+
+    return "Call the `issue_agent_stop` tool now."
+
+
+@mcp.prompt()
+def status() -> str:
+    """Slash command shim → drives ``issue_agent_status``."""
+
+    return "Call the `issue_agent_status` tool now."
+
+
+@mcp.prompt()
+def set_mode(mode: str) -> str:
+    """Slash command shim → drives ``issue_agent_set_mode``.
+
+    Validates the mode arg here (instead of pushing the bad value at
+    the tool) so the user gets a fast, prompt-side clarification when
+    they typo `/mcp__github-issue-agent__set_mode foo` — keeps the
+    error message close to the wrong input rather than embedded in a
+    tool-response envelope.
+    """
+
+    normalized = (mode or "").strip().lower()
+    if normalized not in ("semi", "full"):
+        return (
+            f"`{mode}` is not a valid mode. Use `semi` (approve each step) "
+            "or `full` (run end-to-end)."
+        )
+    return f"Call `issue_agent_set_mode` with mode='{normalized}'."
+
+
+@mcp.prompt()
+def fetch_now() -> str:
+    """Slash command shim → drives ``issue_agent_fetch_now``."""
+
+    return "Call the `issue_agent_fetch_now` tool now."
 
 
 def main() -> None:

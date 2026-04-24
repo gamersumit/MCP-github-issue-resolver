@@ -242,31 +242,75 @@ def _prompt_command(
 
 
 def _success_panel(console: Console, path: Path, cfg: Config, repo: str, account: str) -> None:
-    """Print the final instructions panel."""
+    """Print the final instructions panel.
+
+    The closing panel deliberately separates the two scopes the v0.1
+    UX conflated: PER-REPO config (what we just wrote) vs the GLOBAL
+    MCP server registration (done once per machine by ``install.sh``
+    at user scope, NOT by this wizard). Spelling that out here avoids
+    the v0.1 surprise of "I ran the wizard, why doesn't the slash
+    command work in my OTHER repo".
+    """
 
     body = Text()
-    body.append(f"Config saved to {path}\n\n", style="bold green")
+    body.append(f"Setup complete for {repo}.\n\n", style="bold green")
+
+    body.append("Per-repo config (THIS repo only):\n", style="bold")
+    body.append(f"  {path}\n")
+    body.append("  Stores: label, mode, poll_interval, test/lint commands.\n\n")
+
+    body.append(
+        "MCP server registration (GLOBAL — already done by install.sh):\n",
+        style="bold",
+    )
+    body.append("  Scope: user\n")
+    body.append("  No need to re-register per repo.\n\n")
+
+    body.append("Active gh account in this shell: ", style="bold")
+    body.append(f"{account}\n")
+    body.append(
+        "  (Switch with `gh auth switch -u <other>` before launching "
+        "Claude Code if you need a different account.)\n\n"
+    )
+
     body.append("Summary:\n", style="bold")
-    body.append(f"  repo:              {repo}\n")
-    body.append(f"  gh account:        {account}\n")
     body.append(f"  label:             {cfg.label}\n")
     body.append(f"  mode:              {cfg.mode}\n")
     body.append(f"  poll_interval:     {cfg.poll_interval_min} min\n")
     body.append(f"  test_command:      {cfg.test_command or '(none)'}\n")
     body.append(f"  lint_command:      {cfg.lint_command or '(none)'}\n\n")
-    body.append("Next steps:\n", style="bold")
-    body.append("  1. Register the MCP server with Claude Code:\n")
+
+    body.append("In Claude Code from this repo, you can:\n", style="bold")
+    body.append("  - Type a slash command:\n")
+    body.append("      /mcp__github-issue-agent__start\n", style="cyan")
+    body.append("      /mcp__github-issue-agent__status\n", style="cyan")
     body.append(
-        "     claude mcp add github-issue-agent -- python -m server\n",
-        style="cyan",
+        "      /mcp__github-issue-agent__set_mode <semi|full>\n", style="cyan"
     )
-    body.append("  2. In Claude Code, run:\n")
-    body.append("     /issue-agent start\n", style="cyan")
+    body.append("      /mcp__github-issue-agent__stop\n", style="cyan")
+    body.append("      /mcp__github-issue-agent__fetch_now\n", style="cyan")
+    body.append("  - Or just ask Claude:\n")
+    body.append('      "start the issue agent"\n', style="cyan")
+    body.append('      "show issue-agent status"\n', style="cyan")
+    body.append('      "switch to full mode"\n', style="cyan")
+    body.append("\n")
+    body.append(
+        "If the MCP isn't registered yet, re-run `bash install.sh` from "
+        "the agent's clone dir.\n",
+        style="dim",
+    )
+
     console.print(Panel(body, title="Setup complete", expand=False))
 
 
-async def main() -> int:
-    """Entry point — return an int exit code."""
+async def async_main() -> int:
+    """Async wizard entry point — returns an int exit code.
+
+    Kept async because every gh CLI call is awaited; the sync console-
+    script entry (:func:`main`) wraps this with ``asyncio.run`` so the
+    ``github-issue-agent-setup`` binary registered in pyproject.toml can
+    invoke it without callers having to spin up an event loop themselves.
+    """
 
     console = Console()
     _banner(console)
@@ -390,11 +434,22 @@ async def main() -> int:
     return 0
 
 
-def _run() -> int:
-    """Sync wrapper for ``asyncio.run`` so setuptools entry points work."""
+def main() -> int:
+    """Sync console-script entry — registered as ``github-issue-agent-setup``.
 
-    return asyncio.run(main())
+    Wraps :func:`async_main` with ``asyncio.run`` so the user can invoke
+    ``github-issue-agent-setup`` from any repo dir after a one-time
+    ``bash install.sh`` run. Also keeps ``python -m setup_wizard`` working
+    via the ``__main__`` block below.
+    """
+
+    return asyncio.run(async_main())
+
+
+# Back-compat alias so ``python -m setup_wizard`` (used by tests + by
+# anyone scripting the wizard) keeps working without a Future warning.
+_run = main
 
 
 if __name__ == "__main__":
-    sys.exit(_run())
+    sys.exit(main())

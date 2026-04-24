@@ -50,6 +50,11 @@ ALLOWED_COMMANDS = {
     "chmod",
     "sudo",  # appears in troubleshooting hints (sudo systemctl start docker)
     "brew",  # platform install hint (brew install git)
+    # Console scripts shipped by this package; exposed on $PATH after
+    # `bash install.sh`. Listed explicitly so the README audit allows
+    # the "Quick Start" snippets that use them.
+    "github-issue-agent",
+    "github-issue-agent-setup",
 }
 
 
