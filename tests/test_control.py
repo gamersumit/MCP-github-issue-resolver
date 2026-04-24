@@ -52,10 +52,9 @@ def _stub_polling_tick(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace ``polling._tick_once`` with a no-network stub.
 
     Without this, every ``issue_agent_start`` would spawn a polling
-    task that immediately tries to hit api.github.com via PyGithub.
-    The stub keeps the lifecycle wiring honest (start_polling and
-    stop_polling still run) without making the test suite
-    network-dependent.
+    task that immediately tries to shell out to ``gh``.  The stub
+    keeps the lifecycle wiring honest (start_polling and stop_polling
+    still run) without making the test suite network-dependent.
     """
 
     async def _no_network(app: GhiaApp) -> None:
@@ -67,9 +66,9 @@ def _stub_polling_tick(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _write_config(path: Path, **overrides: Any) -> None:
+    """v0.2 per-repo config — no token, no repo field."""
+
     payload: dict[str, Any] = {
-        "token": "ghp_" + "c" * 36,
-        "repo": "octo/hello",
         "label": "ai-fix",
         "mode": "semi",
         "poll_interval_min": 30,
@@ -92,7 +91,9 @@ async def app(tmp_path: Path) -> AsyncIterator[GhiaApp]:
     _write_config(cfg_path)
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    instance = await create_app(repo_root=repo_root, config_path=cfg_path)
+    instance = await create_app(
+        repo_root=repo_root, config_path=cfg_path, repo_full_name="octo/hello"
+    )
     try:
         yield instance
     finally:
@@ -326,7 +327,9 @@ async def test_start_includes_discovered_conventions_preview(
         "# Rules\n\nBe concise.\n"
     )
 
-    app = await create_app(repo_root=repo_root, config_path=cfg_path)
+    app = await create_app(
+        repo_root=repo_root, config_path=cfg_path, repo_full_name="octo/hello"
+    )
     try:
         resp = await control.issue_agent_start(app)
         assert resp.success

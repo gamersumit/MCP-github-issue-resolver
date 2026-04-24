@@ -1,17 +1,20 @@
-"""TRD-010-TEST — end-to-end setup wizard with mocked prompts + network.
+"""TRD-010-TEST — setup wizard with mocked subprocess + prompts (v0.2 refactor).
 
 Strategy:
-* Patch ``rich.prompt.Prompt.ask``, ``rich.prompt.IntPrompt.ask``, and
-  ``rich.prompt.Confirm.ask`` inside the ``setup_wizard`` module so the
+* Patch ``rich.prompt.Prompt.ask`` and ``IntPrompt.ask`` so the
   wizard's prompts return scripted answers.
-* Mock ``validate_token`` and ``check_repo_access`` in the wizard
-  module so no real HTTP is issued.
-* Direct ``default_config_path`` at a throwaway location inside
+* Patch the four functions that wrap subprocess calls
+  (``detect_repo``, ``gh_cli.gh_available``, ``gh_cli.auth_status``,
+  ``gh_cli.repo_view``) so no real ``git`` / ``gh`` is invoked.
+* Direct ``config_path_for`` at a throwaway location inside
   ``tmp_path`` so the real user config is untouched.
 
-Every test asserts both "wizard completes" and "no network hit" — the
-mocked network functions are themselves asyncio coroutines, so the
-test runner also exercises the wizard's await points.
+Tests cover the five wizard error paths plus the happy path:
+  1. cwd not in a git repo
+  2. gh not on PATH
+  3. gh not authenticated
+  4. active gh account can't see the repo (with suggested fixes)
+  5. happy path saves the per-repo config
 """
 
 from __future__ import annotations
@@ -19,13 +22,15 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
-from typing import Any, Iterator, List
+from typing import Any, List
 from unittest.mock import AsyncMock
 
 import pytest
 
-from ghia.config import Config, load_config, save_config
-from ghia.github_client_light import TokenValidation
+from ghia.config import Config, load_config
+from ghia.errors import ErrorCode
+from ghia.integrations.gh_cli import GhAuthError
+from ghia.repo_detect import RepoDetectionError
 
 import setup_wizard as wiz
 
@@ -36,12 +41,7 @@ import setup_wizard as wiz
 
 
 class _ScriptedPrompt:
-    """Drop-in for ``Prompt.ask`` / ``IntPrompt.ask`` that pops answers.
-
-    The wizard calls these in order; we keep a FIFO queue and yield the
-    next answer each time ``.ask`` is invoked.  Type conversion (str vs
-    int) is handled per-class so ``IntPrompt`` behaves realistically.
-    """
+    """Drop-in for ``Prompt.ask`` / ``IntPrompt.ask`` that pops answers."""
 
     def __init__(self, answers: List[Any]) -> None:
         self._answers = list(answers)
@@ -61,121 +61,95 @@ class _ScriptedPrompt:
 def isolated_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Path:
-    """Redirect default_config_path to tmp_path for wizard I/O."""
+    """Redirect config_path_for to tmp_path for wizard I/O."""
 
-    target = tmp_path / "config.json"
-    monkeypatch.setattr(wiz, "default_config_path", lambda: target)
+    target = tmp_path / "octocat__hello.json"
+    monkeypatch.setattr(wiz, "config_path_for", lambda owner, name: target)
     return target
 
 
 @pytest.fixture
 def _no_detection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force detection to a known empty result so prompt answers match."""
+    """Force test/lint detection to a known empty result."""
 
     from ghia.detection import DetectionResult
 
     monkeypatch.setattr(wiz, "detect", lambda _root: DetectionResult())
 
 
-def _valid_token_validation(fine_grained: bool = False) -> TokenValidation:
-    return TokenValidation(
-        valid=True,
-        user="octocat",
-        scopes=[] if fine_grained else ["repo"],
-        is_fine_grained=fine_grained,
-        missing_scopes=[],
-        error=None,
+@pytest.fixture
+def _detect_repo_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub repo detection to return ``octocat/hello``."""
+
+    monkeypatch.setattr(wiz, "detect_repo", lambda _root: ("octocat", "hello"))
+
+
+@pytest.fixture
+def _gh_authed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub gh_available + auth_status + repo_view as the happy path."""
+
+    monkeypatch.setattr(wiz.gh_cli, "gh_available", lambda: True)
+    monkeypatch.setattr(
+        wiz.gh_cli,
+        "auth_status",
+        AsyncMock(return_value={
+            "authenticated": True,
+            "active_account": "octocat",
+            "hostname": "github.com",
+        }),
     )
-
-
-def _invalid_token_validation(msg: str = "bad token") -> TokenValidation:
-    return TokenValidation(
-        valid=False,
-        user=None,
-        scopes=[],
-        is_fine_grained=False,
-        missing_scopes=[],
-        error=msg,
-    )
-
-
-def _valid_repo_validation(full_name: str = "octocat/hello") -> TokenValidation:
-    return TokenValidation(
-        valid=True,
-        user=full_name,
-        scopes=[],
-        is_fine_grained=True,
-        missing_scopes=[],
-        error=None,
+    monkeypatch.setattr(
+        wiz.gh_cli,
+        "repo_view",
+        AsyncMock(return_value={
+            "name": "hello",
+            "nameWithOwner": "octocat/hello",
+            "viewerPermission": "ADMIN",
+        }),
     )
 
 
 # ----------------------------------------------------------------------
-# End-to-end: fresh run, fine-grained token
+# Happy path: fresh wizard run writes config
 # ----------------------------------------------------------------------
 
 
 async def test_fresh_wizard_run_writes_expected_config(
     isolated_config: Path,
     _no_detection: None,
+    _detect_repo_ok: None,
+    _gh_authed: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Scripted answers in the order the wizard asks:
-    # 1. token
-    # 2. repo
-    # 3. label
-    # 4. mode
-    # 5. test command (empty → skip)
-    # 6. lint command (empty → skip)
-    prompt = _ScriptedPrompt(
-        [
-            "github_pat_" + "a" * 40,  # token
-            "octocat/hello",            # repo
-            "ai-fix",                   # label
-            "semi",                     # mode
-            "",                         # test_command (skip)
-            "",                         # lint_command (skip)
-        ]
-    )
+    # Scripted answers in the order the wizard asks (no token, no repo
+    # — those are auto-detected now):
+    # 1. label
+    # 2. mode
+    # 3. test command (empty → skip)
+    # 4. lint command (empty → skip)
+    prompt = _ScriptedPrompt([
+        "ai-fix",   # label
+        "semi",     # mode
+        "",         # test_command (skip)
+        "",         # lint_command (skip)
+    ])
     monkeypatch.setattr("rich.prompt.Prompt.ask", prompt)
-    # Integer prompts: poll_interval_min
-    int_prompt = _ScriptedPrompt([30])
-    monkeypatch.setattr("rich.prompt.IntPrompt.ask", int_prompt)
-    # Confirm: only fired if we ask to continue despite missing scopes —
-    # the fine-grained path doesn't fire it, so an empty script is fine.
-    confirm = _ScriptedPrompt([])
-    monkeypatch.setattr("rich.prompt.Confirm.ask", confirm)
-
-    # Network: both validators return "valid" on first try.
-    monkeypatch.setattr(
-        wiz,
-        "validate_token",
-        AsyncMock(return_value=_valid_token_validation(fine_grained=True)),
-    )
-    monkeypatch.setattr(
-        wiz,
-        "check_repo_access",
-        AsyncMock(return_value=_valid_repo_validation("octocat/hello")),
-    )
+    monkeypatch.setattr("rich.prompt.IntPrompt.ask", _ScriptedPrompt([30]))
 
     code = await wiz.main()
     assert code == 0
 
     assert isolated_config.exists()
-    # Permissions: POSIX chmod 600
     if os.name == "posix":
         mode = stat.S_IMODE(isolated_config.stat().st_mode)
         assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
 
     cfg = load_config(path=isolated_config)
-    assert cfg.repo == "octocat/hello"
     assert cfg.label == "ai-fix"
     assert cfg.mode == "semi"
     assert cfg.poll_interval_min == 30
     assert cfg.test_command is None
     assert cfg.lint_command is None
-    # Token round-trips as-is
-    assert cfg.token.startswith("github_pat_")
 
 
 # ----------------------------------------------------------------------
@@ -186,12 +160,14 @@ async def test_fresh_wizard_run_writes_expected_config(
 async def test_rerun_loads_existing_config_as_defaults(
     isolated_config: Path,
     _no_detection: None,
+    _detect_repo_ok: None,
+    _gh_authed: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Seed an existing config.
+    from ghia.config import save_config
+
     existing = Config(
-        token="github_pat_" + "e" * 40,
-        repo="alice/widgets",
         label="bug",
         mode="full",
         poll_interval_min=15,
@@ -200,103 +176,35 @@ async def test_rerun_loads_existing_config_as_defaults(
     )
     save_config(existing, path=isolated_config)
 
-    # Scripted ENTER behavior: Prompt.ask was called with default=<existing
-    # value>, so the test returns the existing value to simulate ENTER.
-    # We simply return whatever the wizard passed as ``default`` — the
-    # cleanest simulation of a user hitting ENTER on every prompt.
+    # Returning the prompt's ``default`` simulates the user pressing
+    # ENTER on every prompt — the cleanest model of "accept all".
     def _enter(*_args: Any, **kwargs: Any) -> Any:
         return kwargs.get("default")
 
     monkeypatch.setattr("rich.prompt.Prompt.ask", _enter)
     monkeypatch.setattr("rich.prompt.IntPrompt.ask", _enter)
-    monkeypatch.setattr(
-        "rich.prompt.Confirm.ask", lambda *a, **kw: kw.get("default", True)
-    )
-
-    monkeypatch.setattr(
-        wiz,
-        "validate_token",
-        AsyncMock(return_value=_valid_token_validation(fine_grained=True)),
-    )
-    monkeypatch.setattr(
-        wiz,
-        "check_repo_access",
-        AsyncMock(return_value=_valid_repo_validation("alice/widgets")),
-    )
 
     code = await wiz.main()
     assert code == 0
 
-    # After "ENTER through everything" re-run, config is byte-identical.
     new_cfg = load_config(path=isolated_config)
-    assert new_cfg.repo == existing.repo
     assert new_cfg.label == existing.label
     assert new_cfg.mode == existing.mode
     assert new_cfg.poll_interval_min == existing.poll_interval_min
     assert new_cfg.test_command == existing.test_command
     assert new_cfg.lint_command == existing.lint_command
-    assert new_cfg.token == existing.token
 
 
 # ----------------------------------------------------------------------
-# Bad token → loops until good token provided
-# ----------------------------------------------------------------------
-
-
-async def test_bad_token_then_good_token_loops(
-    isolated_config: Path,
-    _no_detection: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Two token attempts: the first is the "bad" token, the second is good.
-    # After the token loop, the rest of the wizard proceeds normally.
-    prompt = _ScriptedPrompt(
-        [
-            "bad_token",                    # token attempt 1 → rejected
-            "github_pat_" + "g" * 40,       # token attempt 2 → accepted
-            "octocat/hello",                # repo
-            "ai-fix",                       # label
-            "semi",                         # mode
-            "",                             # test
-            "",                             # lint
-        ]
-    )
-    monkeypatch.setattr("rich.prompt.Prompt.ask", prompt)
-    monkeypatch.setattr("rich.prompt.IntPrompt.ask", _ScriptedPrompt([30]))
-    monkeypatch.setattr("rich.prompt.Confirm.ask", _ScriptedPrompt([]))
-
-    validate_mock = AsyncMock(
-        side_effect=[
-            _invalid_token_validation("Token rejected by GitHub (401)."),
-            _valid_token_validation(fine_grained=True),
-        ]
-    )
-    monkeypatch.setattr(wiz, "validate_token", validate_mock)
-    monkeypatch.setattr(
-        wiz,
-        "check_repo_access",
-        AsyncMock(return_value=_valid_repo_validation("octocat/hello")),
-    )
-
-    code = await wiz.main()
-    assert code == 0
-
-    # validate_token was called twice — bad then good
-    assert validate_mock.await_count == 2
-
-    cfg = load_config(path=isolated_config)
-    assert cfg.token.startswith("github_pat_")
-
-
-# ----------------------------------------------------------------------
-# Wizard loads detection when present (smoke)
+# Detection feeds defaults for test/lint commands
 # ----------------------------------------------------------------------
 
 
 async def test_wizard_uses_detection_defaults_for_commands(
     isolated_config: Path,
+    _detect_repo_ok: None,
+    _gh_authed: None,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """Detected commands are offered as defaults and accepted on ENTER."""
 
@@ -316,28 +224,18 @@ async def test_wizard_uses_detection_defaults_for_commands(
     )
     monkeypatch.setattr(wiz, "detect", lambda _root: detection)
 
-    # ENTER-through everything except token/repo which we scripted.
-    # Scripted ordering:
-    #   1. token          (typed)
-    #   2. repo           (typed)
-    #   3. label          (ENTER = ai-fix via default mechanism)
-    #   4. mode           (ENTER = semi)
-    #   5. test_command   (ENTER = pytest -q from detection)
-    #   6. lint_command   (ENTER = ruff check . from detection)
-    # Since ENTER returns the `default` kwarg passed in, we use that
-    # adaptive helper for the ENTER answers.
+    # Sentinel ``None`` answers tell the helper to return whatever
+    # ``default=`` was passed — i.e. simulate ENTER.
     scripted = [
-        "github_pat_" + "f" * 40,   # token
-        "octocat/hello",             # repo
-        None,                        # sentinel → use default for label
-        None,                        # sentinel → use default for mode
-        None,                        # sentinel → default for test cmd
-        None,                        # sentinel → default for lint cmd
+        None,   # label
+        None,   # mode
+        None,   # test_command (default = pytest -q from detection)
+        None,   # lint_command (default = ruff check . from detection)
     ]
 
     idx = {"i": 0}
 
-    def _ask(*args: Any, **kwargs: Any) -> Any:
+    def _ask(*_args: Any, **kwargs: Any) -> Any:
         answer = scripted[idx["i"]]
         idx["i"] += 1
         if answer is None:
@@ -346,19 +244,7 @@ async def test_wizard_uses_detection_defaults_for_commands(
 
     monkeypatch.setattr("rich.prompt.Prompt.ask", _ask)
     monkeypatch.setattr(
-        "rich.prompt.IntPrompt.ask", lambda *a, **kw: kw.get("default", 30)
-    )
-    monkeypatch.setattr("rich.prompt.Confirm.ask", lambda *a, **kw: True)
-
-    monkeypatch.setattr(
-        wiz,
-        "validate_token",
-        AsyncMock(return_value=_valid_token_validation(fine_grained=True)),
-    )
-    monkeypatch.setattr(
-        wiz,
-        "check_repo_access",
-        AsyncMock(return_value=_valid_repo_validation("octocat/hello")),
+        "rich.prompt.IntPrompt.ask", lambda *_a, **kw: kw.get("default", 30)
     )
 
     code = await wiz.main()
@@ -370,6 +256,121 @@ async def test_wizard_uses_detection_defaults_for_commands(
 
 
 # ----------------------------------------------------------------------
+# Error path 1: not in a git repo
+# ----------------------------------------------------------------------
+
+
+async def test_not_in_git_repo_errors_clearly(
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _not_a_repo(_root: Path) -> Any:
+        raise RepoDetectionError("/tmp is not inside a git repository")
+
+    monkeypatch.setattr(wiz, "detect_repo", _not_a_repo)
+
+    code = await wiz.main()
+    assert code == 2
+    # Nothing was written.
+    assert not isolated_config.exists()
+
+
+# ----------------------------------------------------------------------
+# Error path 2: gh not installed
+# ----------------------------------------------------------------------
+
+
+async def test_gh_not_installed_errors_with_install_hint(
+    isolated_config: Path,
+    _detect_repo_ok: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(wiz.gh_cli, "gh_available", lambda: False)
+
+    code = await wiz.main()
+    assert code == 3
+    assert not isolated_config.exists()
+    # The install help mentions at least one OS-specific install line.
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "brew install gh" in output or "apt install gh" in output
+
+
+# ----------------------------------------------------------------------
+# Error path 3: gh not authenticated
+# ----------------------------------------------------------------------
+
+
+async def test_gh_not_authenticated_errors_with_login_hint(
+    isolated_config: Path,
+    _detect_repo_ok: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(wiz.gh_cli, "gh_available", lambda: True)
+    monkeypatch.setattr(
+        wiz.gh_cli,
+        "auth_status",
+        AsyncMock(return_value={
+            "authenticated": False,
+            "active_account": None,
+            "hostname": "github.com",
+        }),
+    )
+
+    code = await wiz.main()
+    assert code == 4
+    assert not isolated_config.exists()
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "gh auth login" in output
+
+
+# ----------------------------------------------------------------------
+# Error path 4: gh authed but wrong account → suggest switch + login
+# ----------------------------------------------------------------------
+
+
+async def test_gh_authed_but_repo_inaccessible_suggests_switch_and_login(
+    isolated_config: Path,
+    _detect_repo_ok: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(wiz.gh_cli, "gh_available", lambda: True)
+    monkeypatch.setattr(
+        wiz.gh_cli,
+        "auth_status",
+        AsyncMock(return_value={
+            "authenticated": True,
+            "active_account": "wrong-user",
+            "hostname": "github.com",
+        }),
+    )
+    monkeypatch.setattr(
+        wiz.gh_cli,
+        "repo_view",
+        AsyncMock(side_effect=GhAuthError(
+            code=ErrorCode.REPO_NOT_FOUND,
+            message="GitHub returned 404: Could not resolve to a Repository",
+        )),
+    )
+
+    code = await wiz.main()
+    assert code == 5
+    assert not isolated_config.exists()
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    # Both suggested fixes must appear in the user-facing error.
+    assert "gh auth switch" in output
+    assert "gh auth login" in output
+    # The active account name must appear so the user knows what they're switching from.
+    assert "wrong-user" in output
+
+
+# ----------------------------------------------------------------------
 # Keyboard interrupt aborts cleanly without writing config
 # ----------------------------------------------------------------------
 
@@ -377,26 +378,16 @@ async def test_wizard_uses_detection_defaults_for_commands(
 async def test_keyboard_interrupt_aborts_without_writing(
     isolated_config: Path,
     _no_detection: None,
+    _detect_repo_ok: None,
+    _gh_authed: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _boom(*args: Any, **kwargs: Any) -> Any:
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
         raise KeyboardInterrupt
 
     monkeypatch.setattr("rich.prompt.Prompt.ask", _boom)
     monkeypatch.setattr(
-        "rich.prompt.IntPrompt.ask", lambda *a, **kw: 30
-    )
-    monkeypatch.setattr("rich.prompt.Confirm.ask", lambda *a, **kw: True)
-
-    monkeypatch.setattr(
-        wiz,
-        "validate_token",
-        AsyncMock(return_value=_valid_token_validation(fine_grained=True)),
-    )
-    monkeypatch.setattr(
-        wiz,
-        "check_repo_access",
-        AsyncMock(return_value=_valid_repo_validation()),
+        "rich.prompt.IntPrompt.ask", lambda *_a, **_kw: 30
     )
 
     code = await wiz.main()

@@ -37,8 +37,6 @@ def _make_app(
     lint_command: str | None = None,
 ) -> GhiaApp:
     cfg = Config(
-        token="ghp_" + "x" * 36,
-        repo="octo/hello",
         label="ai-fix",
         mode="semi",
         poll_interval_min=30,
@@ -50,6 +48,7 @@ def _make_app(
         config=cfg,
         session=SessionStore(tmp_path / "session.json"),
         repo_root=repo,
+        repo_full_name="octo/hello",
         logger=logging.getLogger("ghia-test-lint"),
     )
 

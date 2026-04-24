@@ -1,21 +1,27 @@
-"""Interactive setup wizard (TRD-010).
+"""Interactive setup wizard (TRD-010, v0.2 refactor).
 
-Runs once per machine to populate ``~/.config/github-issue-agent/config.json``.
-The wizard is deliberately a *bulk* collection — every prompt has a
-default and the user can hit ENTER through the whole flow if the
-detected values look right.
+Runs once per repo to populate
+``~/.config/github-issue-agent/repos/<owner>__<name>.json``.  The
+wizard is still a bulk collection — every prompt has a default and
+the user can hit ENTER through the whole flow if the detected values
+look right.
 
-Key UX rules (AC-010-* / REQ-002):
+v0.2 change: auth moves to the ``gh`` CLI.  The wizard now:
 
-* The token prompt never echoes the typed value.
-* The token is never printed back in a summary panel.
-* Detection runs before the first prompt so the user immediately sees
-  sensible suggestions.
-* A pre-existing config file is loaded and its values pre-fill the
-  defaults so re-running the wizard is a safe no-op.
-* Token and repo are validated live against the GitHub API before
-  anything hits disk — bad tokens loop the prompt, bad repos loop the
-  repo prompt.
+1. Verifies the cwd is inside a git repo.
+2. Auto-detects ``owner/name`` from ``git remote get-url origin``.
+3. Verifies ``gh`` is on PATH and authenticated.
+4. Probes ``gh repo view`` to confirm the active gh account can see
+   the repo.  On failure, prints the two most likely remedies:
+   ``gh auth switch -u <other-account>`` and
+   ``gh auth login --hostname github.com``.
+5. Prompts for label / mode / poll_interval / test+lint commands.
+6. Persists to the per-repo config path.
+
+No token prompt anywhere — the PAT model is gone.  The wizard is
+still password-safe by default (no secret-shaped values ever flow
+through its input path), but the token-specific UX (never-echo,
+scope-warnings) is moot because we don't handle tokens anymore.
 
 The module is named ``setup_wizard.py`` — NOT ``setup.py`` — to avoid
 confusion with the legacy setuptools entry point.  Invoke via
@@ -26,45 +32,34 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, IntPrompt, Prompt
+from rich.prompt import IntPrompt, Prompt
 from rich.text import Text
 
 from ghia.config import (
     Config,
     ConfigMissingError,
-    default_config_path,
+    config_path_for,
     load_config,
     save_config,
 )
 from ghia.detection import DetectedCommand, DetectionResult, detect
-from ghia.github_client_light import (
-    TokenValidation,
-    check_repo_access,
-    validate_token,
-)
-from ghia.redaction import set_token
+from ghia.integrations import gh_cli
+from ghia.integrations.gh_cli import GhAuthError, GhUnavailable
+from ghia.repo_detect import RepoDetectionError, detect_repo
 from ghia.tools.validation import InvalidCommandError, validate_command
 
 logger = logging.getLogger(__name__)
 
-_FINE_GRAINED_PAT_URL = "https://github.com/settings/personal-access-tokens/new"
-_CLASSIC_PAT_URL = "https://github.com/settings/tokens/new"
 
-# Matches GitHub's documented ``owner/name`` form.  Kept in sync with
-# ``ghia.config._REPO_RE`` so the wizard rejects the same strings the
-# model would reject later — users only see one error, not two.
-_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
-
-# How many times the wizard will re-prompt the token / repo before
-# giving up.  Users hitting this limit are either on a broken network
-# or doing something adversarial — either way, bail.
+# How many times the wizard will re-prompt a command before giving up.
+# Users hitting this limit are either confused or adversarial — either
+# way, bail rather than looping forever.
 _MAX_PROMPT_ATTEMPTS = 5
 
 
@@ -73,24 +68,42 @@ def _banner(console: Console) -> None:
 
     body = Text()
     body.append(
-        "This wizard sets up the github-issue-agent MCP server.\n\n",
+        "This wizard sets up the github-issue-agent for the current repo.\n\n",
         style="bold",
     )
     body.append(
-        "It will ask for a GitHub personal access token and a target "
-        "repository, then probe the GitHub API to confirm both work "
-        "before writing anything to disk.\n\n"
+        "It auto-detects the repo from `git remote get-url origin` and "
+        "uses your existing `gh` CLI authentication — no token prompts.\n\n"
     )
     body.append(
-        "Config is stored at ~/.config/github-issue-agent/config.json "
-        "(chmod 600). The token is never logged, printed, or echoed "
-        "back after you type it."
+        "Config is stored at ~/.config/github-issue-agent/repos/"
+        "<owner>__<name>.json (chmod 600), one file per repo so you can "
+        "coexist multiple accounts cleanly.\n"
     )
     console.print(Panel(body, title="github-issue-agent setup", expand=False))
 
 
+def _print_gh_install_help(console: Console) -> None:
+    """Print install instructions for each common OS.
+
+    Pulled into its own function so the error paths for "gh missing"
+    and "gh misconfigured" can share the prose without duplicating it.
+    """
+
+    console.print(
+        "[red]The `gh` CLI is not on PATH.[/red]\n"
+        "Install it first, then re-run this wizard.\n\n"
+        "  macOS:   [cyan]brew install gh[/cyan]\n"
+        "  Debian:  [cyan]sudo apt install gh[/cyan] "
+        "(or: see https://cli.github.com/)\n"
+        "  Fedora:  [cyan]sudo dnf install gh[/cyan]\n"
+        "  Windows: [cyan]winget install --id GitHub.cli[/cyan]\n"
+        "  Other:   [link]https://cli.github.com/[/link]"
+    )
+
+
 def _load_existing(path: Path, console: Console) -> Optional[Config]:
-    """Best-effort load of an existing config; surfaces errors gently."""
+    """Best-effort load of an existing per-repo config."""
 
     if not path.exists():
         return None
@@ -124,153 +137,20 @@ def _prompt_with_default(
     console: Console,
     label: str,
     default: Optional[str],
-    *,
-    password: bool = False,
 ) -> str:
-    """Wrap ``Prompt.ask`` with our default-display convention.
-
-    Args:
-        console: Rich console for consistent styling.
-        label: The user-facing question.
-        default: The default value if the user hits ENTER.  Always
-            shown explicitly as ``(ENTER = <default>)`` unless the
-            prompt is password-type, where we never leak the default.
-        password: Whether to mask the typed value.
-
-    Returns:
-        The user's response (or the default).
-    """
+    """Wrap ``Prompt.ask`` with our default-display convention."""
 
     prompt_text = label
-    if default is not None and not password:
+    if default is not None:
         prompt_text = f"{label} (ENTER = {default})"
 
     value = Prompt.ask(
         prompt_text,
         default=default,
-        password=password,
         console=console,
         show_default=False,  # we render our own default display above
     )
-    # Prompt.ask may return None for password prompts with no default.
     return (value or "").strip()
-
-
-async def _prompt_token(
-    console: Console, current: Optional[str]
-) -> tuple[str, TokenValidation]:
-    """Loop until the user gives us a GitHub token that validates.
-
-    Returns:
-        A tuple of (token, validation-result).  The validation result
-        is returned alongside so the caller can surface scope warnings
-        without re-hitting the network.
-    """
-
-    console.print(
-        "\n[bold]GitHub token[/bold] — why: the agent calls the GitHub "
-        "API (issues, PRs, commits) on your behalf, and clones repos "
-        "via HTTPS using this token."
-    )
-    console.print(
-        f"Generate a fine-grained PAT: [link]{_FINE_GRAINED_PAT_URL}[/link]"
-    )
-    console.print(
-        f"Or a classic PAT (scope: [bold]repo[/bold]): "
-        f"[link]{_CLASSIC_PAT_URL}[/link]"
-    )
-    if current is not None:
-        console.print(
-            "[dim]A token is already configured; ENTER to keep it.[/dim]"
-        )
-
-    for attempt in range(_MAX_PROMPT_ATTEMPTS):
-        token = _prompt_with_default(
-            console,
-            "Paste token",
-            default=current,  # falls through to keep-existing on ENTER
-            password=True,
-        )
-        if not token:
-            console.print("[red]Token cannot be empty. Try again.[/red]")
-            continue
-
-        console.print("[dim]Contacting GitHub to validate…[/dim]")
-        result = await validate_token(token)
-        if result.valid:
-            if result.is_fine_grained:
-                console.print(
-                    "[green]Token accepted[/green] "
-                    f"(user: [bold]{result.user or 'unknown'}[/bold], "
-                    "fine-grained PAT)."
-                )
-                console.print(
-                    "[yellow]Note: fine-grained PATs don't expose their "
-                    "scope list. Make sure this token is scoped to the "
-                    "single repo you want to work on and includes "
-                    "Issues: R/W, Pull requests: R/W, Contents: R/W.[/yellow]"
-                )
-            else:
-                console.print(
-                    "[green]Token accepted[/green] "
-                    f"(user: [bold]{result.user or 'unknown'}[/bold], "
-                    f"scopes: {', '.join(result.scopes) or 'none'})."
-                )
-                if result.missing_scopes:
-                    console.print(
-                        f"[yellow]Missing scopes: "
-                        f"{', '.join(result.missing_scopes)}. "
-                        "The agent will fail on write operations without these."
-                        "[/yellow]"
-                    )
-                    if not Confirm.ask(
-                        "Continue anyway?",
-                        default=False,
-                        console=console,
-                    ):
-                        continue
-            return token, result
-
-        console.print(f"[red]Token rejected:[/red] {result.error}")
-        # fall through to retry
-
-    raise SystemExit(
-        "Too many failed token attempts. Aborting setup — no config written."
-    )
-
-
-async def _prompt_repo(
-    console: Console, token: str, current: Optional[str]
-) -> str:
-    """Loop until the user gives us a repo we can actually see."""
-
-    console.print(
-        "\n[bold]Target repository[/bold] (format: owner/name, e.g. octocat/hello-world)"
-    )
-    for attempt in range(_MAX_PROMPT_ATTEMPTS):
-        repo = _prompt_with_default(console, "Repo", default=current)
-        if not _REPO_RE.match(repo):
-            console.print(
-                "[red]Format must be 'owner/name' (letters, digits, dots, "
-                "underscores, dashes). Try again.[/red]"
-            )
-            continue
-
-        console.print("[dim]Checking repo access…[/dim]")
-        result = await check_repo_access(token, repo)
-        if result.valid:
-            console.print(
-                f"[green]Repo accessible[/green] "
-                f"(full name: [bold]{result.user or repo}[/bold])."
-            )
-            return result.user or repo
-
-        console.print(f"[red]{result.error}[/red]")
-        # fall through to retry
-
-    raise SystemExit(
-        "Too many failed repo attempts. Aborting setup — no config written."
-    )
 
 
 def _prompt_label(console: Console, current: Optional[str]) -> str:
@@ -339,7 +219,7 @@ def _prompt_command(
         + (" (ENTER to skip)" if not default else f" (ENTER = {default})")
     )
 
-    while True:
+    for _attempt in range(_MAX_PROMPT_ATTEMPTS):
         raw = Prompt.ask(
             prompt_text,
             default=default,
@@ -355,14 +235,20 @@ def _prompt_command(
             console.print(f"[red]{exc}[/red]")
             # loop — let the user fix it
 
+    raise SystemExit(
+        f"Too many invalid {kind}-command attempts. Aborting setup — "
+        "no config written."
+    )
 
-def _success_panel(console: Console, path: Path, cfg: Config) -> None:
-    """Print the final instructions panel.  NEVER prints the token."""
+
+def _success_panel(console: Console, path: Path, cfg: Config, repo: str, account: str) -> None:
+    """Print the final instructions panel."""
 
     body = Text()
     body.append(f"Config saved to {path}\n\n", style="bold green")
-    body.append("Summary (token NOT shown):\n", style="bold")
-    body.append(f"  repo:              {cfg.repo}\n")
+    body.append("Summary:\n", style="bold")
+    body.append(f"  repo:              {repo}\n")
+    body.append(f"  gh account:        {account}\n")
     body.append(f"  label:             {cfg.label}\n")
     body.append(f"  mode:              {cfg.mode}\n")
     body.append(f"  poll_interval:     {cfg.poll_interval_min} min\n")
@@ -385,12 +271,66 @@ async def main() -> int:
     console = Console()
     _banner(console)
 
-    config_path = default_config_path()
+    # Step 1 + 2: auto-detect the repo.  ``detect_repo`` verifies the
+    # cwd is a git repo AND pulls owner/name out of origin — one call
+    # covers both failure modes with distinct error messages.
+    try:
+        owner, name = detect_repo(Path.cwd())
+    except RepoDetectionError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 2
+
+    repo_full = f"{owner}/{name}"
+    console.print(f"\n[bold]Repo:[/bold] {repo_full}")
+
+    # Step 3: gh must be on PATH.
+    if not gh_cli.gh_available():
+        _print_gh_install_help(console)
+        return 3
+
+    # Step 4: gh must be authenticated on github.com.
+    try:
+        status = await gh_cli.auth_status()
+    except GhUnavailable:
+        # Race between gh_available and auth_status (someone removed
+        # gh between the checks) — surface the same install help.
+        _print_gh_install_help(console)
+        return 3
+
+    if not status["authenticated"]:
+        console.print(
+            "[red]`gh` is not authenticated.[/red]\n"
+            "Run: [cyan]gh auth login --hostname github.com[/cyan]\n"
+            "Then re-run this wizard."
+        )
+        return 4
+
+    active_account = status["active_account"]
+    console.print(f"[bold]Active gh account:[/bold] {active_account}")
+
+    # Step 5: verify the active account can actually see the repo.
+    # The error path here is the most common "oh I'm logged in but
+    # as the wrong account" situation, so the suggested-fixes message
+    # matters more than the other branches.
+    try:
+        await gh_cli.repo_view(repo_full)
+    except GhAuthError as exc:
+        console.print(
+            f"[red]Active gh account `{active_account}` cannot see "
+            f"`{repo_full}`: {exc.message}[/red]\n"
+            "Try one of:\n"
+            f"  [cyan]gh auth switch -u <other-account>[/cyan]  "
+            "(switch to an account with access)\n"
+            "  [cyan]gh auth login --hostname github.com[/cyan]  "
+            "(log in as a new account)"
+        )
+        return 5
+
+    # Step 6: gather the 4 settings.  Detection runs on cwd so the
+    # test/lint prompts have intelligent defaults.
+    config_path = config_path_for(owner, name)
     existing = _load_existing(config_path, console)
 
-    # Run detection early so the test/lint prompts can use it as a
-    # default.  repo_root is cwd — this is a developer running the
-    # wizard from the project they want the agent to operate on.
     detection: DetectionResult = detect(Path.cwd())
     if detection.test or detection.lint:
         console.print(
@@ -400,16 +340,6 @@ async def main() -> int:
         )
 
     try:
-        token, _token_validation = await _prompt_token(
-            console, existing.token if existing else None
-        )
-        # Register the token for redaction so any subsequent logs
-        # (e.g. the repo-access probe's network errors) get scrubbed.
-        set_token(token)
-
-        repo = await _prompt_repo(
-            console, token, existing.repo if existing else None
-        )
         label = _prompt_label(console, existing.label if existing else None)
         mode = _prompt_mode(console, existing.mode if existing else None)
         poll = _prompt_poll_interval(
@@ -436,8 +366,6 @@ async def main() -> int:
         return 1
 
     cfg = Config(
-        token=token,
-        repo=repo,
         label=label,
         mode=mode,  # type: ignore[arg-type]  # Literal narrowing
         poll_interval_min=poll,
@@ -445,7 +373,7 @@ async def main() -> int:
         lint_command=lint_cmd,
     )
     save_config(cfg, path=config_path)
-    _success_panel(console, config_path, cfg)
+    _success_panel(console, config_path, cfg, repo_full, active_account or "unknown")
     return 0
 
 

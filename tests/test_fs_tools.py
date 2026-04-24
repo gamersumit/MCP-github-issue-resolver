@@ -40,20 +40,10 @@ def app(repo_root: Path, tmp_path: Path) -> GhiaApp:
     file on disk).
     """
 
-    cfg = Config(
-        token="ghp_" + "x" * 36,
-        repo="octo/hello",
-        label="ai-fix",
-        mode="semi",
-        poll_interval_min=30,
-    )
+    cfg = Config(label="ai-fix", mode="semi", poll_interval_min=30)
     session_path = tmp_path / "session.json"
     session = SessionStore(session_path)
-    return GhiaApp(
-        config=cfg,
-        session=session,
-        repo_root=repo_root,
-        logger=logging.getLogger("ghia-test"),
+    return GhiaApp(config=cfg, session=session, repo_root=repo_root, repo_full_name="octo/hello", logger=logging.getLogger("ghia-test"),
     )
 
 

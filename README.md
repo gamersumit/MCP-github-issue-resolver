@@ -17,7 +17,9 @@ Drops into Claude Code as a local Model Context Protocol (MCP) server, stays idl
 | Sprint 4 — Code & Git ops (TRD-022..030) | Shipped — fs/git/PR tools, native-CLI git wrapper with PyGithub fallback, Docker-sandboxed `run_tests`, allow-listed `check_linting`, `undo_last_change` with author-email guard. |
 | Sprint 5 — Polish & Ship (TRD-031..035) | Shipped — serial queue processor, polling timer with jitter, retry policy, README + packaging polish. |
 
-**453 tests** pass in ~19s. Coverage is enforced ≥ 80% at sprint exit. All MCP tools listed below are wired and reachable from Claude Code.
+**479 tests** pass in ~19s. Coverage is enforced ≥ 80% at sprint exit. All MCP tools listed below are wired and reachable from Claude Code.
+
+> **v0.2 breaking change.** PAT-based config is gone — auth now flows through your existing `gh` CLI session, repos are auto-detected from `git remote get-url origin`, and config is per-repo (`~/.config/github-issue-agent/repos/<owner>__<name>.json`). If you upgraded from v0.1, your old `~/.config/github-issue-agent/config.json` is ignored — run `python -m setup_wizard` once per repo to migrate.
 
 See `docs/PRD/PRD-2026-001-github-issue-agent.md` and `docs/TRD/TRD-2026-001-github-issue-agent.md` for the full specification and technical design.
 
@@ -36,17 +38,17 @@ That's it. The installer is idempotent — re-running it upgrades dependencies a
 ### Prerequisites
 
 - **Python 3.10+** (stdlib `tomllib` is auto-used on 3.11+, `tomli` backport pulled in for 3.10)
-- **Git** on `$PATH` — default branch is auto-detected per repo (no `main` / `master` hardcoding)
+- **Git** on `$PATH` — default branch is auto-detected per repo (no `main` / `master` hardcoding); also used to detect `origin` so the agent knows what repo it's working on
+- **`gh` CLI** on `$PATH` and authenticated — **required** in v0.2; this is where the agent gets its GitHub credentials. Run `gh auth login --hostname github.com` once and the agent inherits the active account on every call
 - **Claude Code** CLI — [install guide](https://docs.claude.com/en/docs/claude-code) — for MCP registration
 - **Docker** — optional but required for `run_tests` (sandboxed test execution); `run_tests` returns `DOCKER_UNAVAILABLE` with install hint when the daemon is unreachable
-- **`gh` CLI** — optional; `create_pr` falls back to PyGithub when `gh` is absent
 
 ### What the installer does
 
 1. Verifies Python ≥ 3.10
 2. Creates `./.venv` (or reuses an existing one)
 3. `pip install -r requirements.txt` and `pip install -e .` (editable so source edits take effect immediately)
-4. Runs `python -m setup_wizard` interactively — collects token, repo, label, mode, poll interval, test/lint commands
+4. Runs `python -m setup_wizard` interactively — auto-detects the repo from `git remote get-url origin`, verifies your active `gh` account can see it, then collects label, mode, poll interval, test/lint commands. **No token prompt** — the wizard reuses your existing `gh` auth.
 5. Best-effort `claude mcp add github-issue-agent -- $VENV/bin/python -m server` so the `/issue-agent ...` slash commands appear in Claude Code
 
 If `claude` is not on `$PATH`, the installer prints the exact registration command you can run later.
@@ -55,7 +57,16 @@ If `claude` is not on `$PATH`, the installer prints the exact registration comma
 
 ## Quick Start
 
-After `bash install.sh` completes, open Claude Code and type:
+```bash
+# One-time per machine (skip if you already use gh)
+gh auth login --hostname github.com
+
+# One-time per repo
+cd /path/to/your/repo
+python -m setup_wizard
+```
+
+Then open Claude Code in the repo dir and type:
 
 ```
 /issue-agent start
@@ -104,11 +115,18 @@ Internal tools the protocol drives (Claude calls these automatically — you don
 ### Setup wizard
 
 ```bash
+cd /path/to/your/repo
 source .venv/bin/activate
 python -m setup_wizard
 ```
 
-Run any time you want to change your token, swap repos, change the label, switch default mode, adjust the poll interval, or override the auto-detected test/lint commands. The wizard reads your current config and pre-fills every prompt — ENTER accepts the existing value.
+Run from the repo directory any time you want to change the label, switch default mode, adjust the poll interval, or override the auto-detected test/lint commands. The wizard:
+
+1. Reads `git remote get-url origin` to identify the repo
+2. Confirms your active `gh` account can see it
+3. Reads any existing per-repo config and pre-fills every prompt — ENTER accepts the current value
+
+To swap accounts (e.g. you're working on a repo owned by a different GitHub user), use `gh auth switch -u <other-account>` first; the very next `setup_wizard` run (and every subsequent agent call) uses the new account automatically.
 
 ---
 
@@ -130,33 +148,65 @@ The mode is read at every decision point in `ghia/prompts/agent_protocol.md` (re
 
 ## Token how-to
 
-A [**fine-grained personal access token**](https://github.com/settings/personal-access-tokens/new) scoped to a single repo is recommended. Required permissions:
+**v0.2 doesn't use a token directly.** Auth is delegated to the [**`gh` CLI**](https://cli.github.com/), which holds your GitHub credentials in the OS keychain (or its own config tree). The agent shells out to `gh` for every GitHub API call and inherits whichever account is currently active.
 
-- **Issues** — Read & Write (list, comment)
-- **Pull requests** — Read & Write (create, check duplicates)
-- **Contents** — Read & Write (push branches)
+### Install gh
 
-Classic PATs (`ghp_...`) with the `repo` scope also work; the wizard accepts both.
+```bash
+brew install gh                         # macOS
+sudo apt install gh                     # Debian / Ubuntu
+sudo dnf install gh                     # Fedora
+```
 
-The wizard validates the token before persisting:
+Windows or other platforms: see [cli.github.com](https://cli.github.com/).
 
-1. `GET /user` — confirms the token is live
-2. `GET /repos/{owner}/{name}` — confirms the token can see the configured repo
+### Log in
 
-On either failure, you get a structured error (`TOKEN_INVALID` or `REPO_NOT_FOUND`) and nothing is written to disk.
+```bash
+gh auth login --hostname github.com
+```
+
+The interactive flow walks you through choosing HTTPS vs SSH, picking an authentication method (browser / token paste / key), and stashing the credential in your keychain. You only have to do this once per account per machine.
+
+### Multi-account workflow
+
+If you contribute to repos owned by different GitHub accounts (e.g. personal + work), log in to each account once:
+
+```bash
+gh auth login --hostname github.com    # interactive: pick "personal" account
+gh auth login --hostname github.com    # interactive: pick "work" account
+gh auth status                          # shows both, marks one as Active
+gh auth switch -u work-account          # set the active account
+```
+
+Then `python -m setup_wizard` from the repo dir picks up the active account automatically. **Each repo gets its own config file** at `~/.config/github-issue-agent/repos/<owner>__<name>.json`, so a personal repo's config never collides with a work repo's, and the agent will use the right account for whichever repo you're sitting in.
+
+### Wizard validation
+
+Before persisting anything, the wizard:
+
+1. Verifies the cwd is inside a git repo (`git rev-parse --show-toplevel`)
+2. Auto-detects `owner/name` from `git remote get-url origin`
+3. Verifies `gh` is installed and authenticated
+4. Probes `gh repo view <owner>/<name>` to confirm the active account can actually see the repo
+
+If the active account can't see the repo (e.g. you logged in as `personal` but the repo belongs to `work`), the wizard prints both fixes and exits without writing anything:
+
+```
+Active gh account 'personal' cannot see 'work-org/internal-tool'.
+Try one of:
+  gh auth switch -u work-account
+  gh auth login --hostname github.com
+```
 
 ### Safety
 
-- Config is written to `~/.config/github-issue-agent/config.json` with `chmod 600`. Permission is verified on every load.
-- The token is **never** printed back to the terminal, written to a log line, or included in an error message. `ghia.redaction` installs a `logging.Filter` on the root logger that:
-  - replaces the live token literal with `***REDACTED***`
-  - regex-matches every documented GitHub prefix (`ghp_`, `github_pat_`, `ghs_`, `gho_`, `ghu_`, `ghr_`) as a defense-in-depth net for tokens that aren't the configured one
-- Manual config (CI / pre-seed) is supported — see schema below.
+- Config is written to `~/.config/github-issue-agent/repos/<owner>__<name>.json` with `chmod 600`. There's no token in the file (gh owns it) but the permission is enforced defensively in case a future field needs protection.
+- The token redaction filter stays installed on the root logger as defense-in-depth: if any subsystem (gh stderr, a misconfigured logger) ever echoes a token-shaped substring, the regex safety net catches it before the line reaches a handler.
+- Manual config (CI / pre-seed) is supported — see schema below. Drop one file per repo.
 
 ```json
 {
-  "token": "github_pat_...",
-  "repo": "your-owner/your-repo",
   "label": "ai-fix",
   "mode": "semi",
   "poll_interval_min": 30,
@@ -165,7 +215,7 @@ On either failure, you get a structured error (`TOKEN_INVALID` or `REPO_NOT_FOUN
 }
 ```
 
-Then `chmod 600 ~/.config/github-issue-agent/config.json`.
+Save as `~/.config/github-issue-agent/repos/<owner>__<name>.json`, then `chmod 600` it.
 
 ---
 
@@ -173,8 +223,9 @@ Then `chmod 600 ~/.config/github-issue-agent/config.json`.
 
 | Concern | Defense |
 |---|---|
-| Token in logs | `logging.Filter` replaces the live token literal AND regex-matches all GitHub token prefixes (`ghp_`, `github_pat_`, `ghs_`, `gho_`, `ghu_`, `ghr_`) before the formatter runs. |
-| Token at rest | `~/.config/github-issue-agent/config.json` enforced at `chmod 600`. Permission verified on load — wider perms refuse to start. |
+| Token at rest | **The agent never holds a token.** `gh` CLI owns the credential (OS keychain or its own config tree). The agent's config files contain only label/mode/interval/command settings. |
+| Token in logs | `logging.Filter` defensively regex-matches every GitHub token prefix (`ghp_`, `github_pat_`, `ghs_`, `gho_`, `ghu_`, `ghr_`) before the formatter runs — so even if `gh` stderr ever leaks a token-shaped substring, it gets scrubbed. |
+| Per-repo config at rest | `~/.config/github-issue-agent/repos/<owner>__<name>.json` enforced at `chmod 600`. |
 | Path traversal | Every fs tool resolves paths inside `repo_root`. `..`, absolute escape, and symlink escape all reject with `PATH_TRAVERSAL`. |
 | Partial writes | `ghia.atomic.atomic_write_text` writes to `tempfile` → `os.fsync` → `os.replace`. Crash mid-write leaves the original intact. |
 | Arbitrary shell in `run_tests` / `check_linting` | Allow-list-validated. Shell metacharacters (`&`, `|`, `;`, `$`, backticks, redirection) are rejected at wizard time AND at execution time. No `shell=True` anywhere. |
@@ -189,12 +240,20 @@ Then `chmod 600 ~/.config/github-issue-agent/config.json`.
 ## Troubleshooting
 
 **`{success: false, code: "CONFIG_MISSING"}`**
-`~/.config/github-issue-agent/config.json` is missing or unreadable.
-Fix: `source .venv/bin/activate && python -m setup_wizard`
+`~/.config/github-issue-agent/repos/<owner>__<name>.json` is missing or unreadable for this repo.
+Fix: `cd` into the repo, then `source .venv/bin/activate && python -m setup_wizard`.
 
 **`{success: false, code: "TOKEN_INVALID"}`**
-Token is expired, revoked, or missing required scopes.
-Fix: regenerate at [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) (or [github.com/settings/tokens](https://github.com/settings/tokens) for classic), then re-run `python -m setup_wizard`.
+`gh` is not authenticated, or the active account's credential expired.
+Fix: `gh auth status` to see what gh thinks; `gh auth login --hostname github.com` to re-auth, or `gh auth switch -u <other>` if you need a different account.
+
+**`{success: false, code: "REPO_NOT_FOUND"}`**
+The active `gh` account doesn't have access to the repo `git remote get-url origin` points at.
+Fix: `gh auth switch -u <account-with-access>` if you have the right credentials under another login, or ask the repo owner to grant your active account access.
+
+**`{success: false, code: "INVALID_INPUT"}` mentioning "not inside a git repository" or "no 'origin' remote"**
+Claude Code was launched from a directory that isn't a git repo (or has no `origin` remote).
+Fix: `cd` into a git repo with an `origin` remote on github.com and re-run.
 
 **`{success: false, code: "RATE_LIMITED"}`**
 You've hit GitHub's REST rate limit (5,000/hr authenticated, 60/hr unauthenticated).
@@ -249,13 +308,13 @@ github-issue-agent/
 │   ├── redaction.py             Token redaction logging filter
 │   ├── atomic.py                Atomic write utilities
 │   ├── paths.py                 Path-traversal guard
-│   ├── config.py                Config model + load/save (chmod 600)
+│   ├── config.py                Per-repo config model + load/save (chmod 600)
+│   ├── repo_detect.py           Auto-detect owner/name from `git remote get-url origin`
 │   ├── session.py               SessionStore with asyncio.Lock
 │   ├── protocol.py              agent_protocol.md renderer
 │   ├── convention_scan.py       CLAUDE.md / CONTRIBUTING.md discovery
 │   ├── detection.py             Test-runner / linter auto-detection
-│   ├── github_client_light.py   Minimal httpx client for setup-time probes
-│   ├── network.py               Retry-After honouring HTTP retry helper
+│   ├── network.py               Rate-limit / transport-error helpers
 │   ├── retry.py                 Generic retry policy (exp backoff + jitter)
 │   ├── naming.py                Branch / commit / PR slug builder
 │   ├── polling.py               Background polling task (start/stop)
@@ -265,7 +324,7 @@ github-issue-agent/
 │   │   ├── issues.py            list/get/pick/skip/post-comment/dup-check
 │   │   ├── fs.py                read_file/write_file/list_directory/...
 │   │   ├── git.py               create_branch/commit_changes/push_branch/...
-│   │   ├── pr.py                create_pr (gh-cli with PyGithub fallback)
+│   │   ├── pr.py                create_pr (via gh CLI)
 │   │   ├── lint.py              check_linting (allow-listed)
 │   │   ├── tests.py             run_tests (Docker sandbox)
 │   │   ├── undo.py              undo_last_change (author-email guarded)
@@ -275,11 +334,11 @@ github-issue-agent/
 │   │   ├── terminal.py          rich fallback for headless / SSH
 │   │   └── opener.py            Headless detection + browser orchestrator
 │   └── integrations/
-│       ├── github.py            Full PyGithub wrapper (GitHubClient)
+│       ├── gh_cli.py            Async wrapper over the `gh` CLI subprocess
 │       └── docker_runner.py     Docker SDK wrapper for run_tests
 │   ├── ui_static/picker.html    Self-contained picker UI (ships in wheel)
 │   └── prompts/agent_protocol.md  Injected into Claude on start (ships in wheel)
-├── tests/                       pytest + pytest-asyncio (453 tests)
+├── tests/                       pytest + pytest-asyncio (479 tests)
 └── docs/
     ├── PRD/PRD-2026-001-…       Product requirements (28 REQs, 85 ACs)
     └── TRD/TRD-2026-001-…       Technical design (76 TRD tasks)
@@ -291,7 +350,7 @@ github-issue-agent/
 python -m pytest -q
 ```
 
-453 tests, ~19s runtime. Coverage gate ≥ 80%.
+479 tests, ~19s runtime. Coverage gate ≥ 80%.
 
 ```bash
 python -m pytest tests/test_redaction.py -v
@@ -308,7 +367,7 @@ python -c "from ghia.app import create_app; print('ok')"
 Verifies the composition root imports.
 
 ```bash
-python -c "import ghia, ghia.tools.git, ghia.tools.fs, ghia.tools.pr, ghia.tools.lint, ghia.tools.tests, ghia.tools.undo, ghia.tools.issues, ghia.tools.control, ghia.queue_processor, ghia.polling, ghia.network, ghia.naming, ghia.retry, ghia.integrations.github, ghia.integrations.docker_runner, ghia.ui.server, ghia.ui.terminal, ghia.ui.opener; print('OK')"
+python -c "import ghia, ghia.tools.git, ghia.tools.fs, ghia.tools.pr, ghia.tools.lint, ghia.tools.tests, ghia.tools.undo, ghia.tools.issues, ghia.tools.control, ghia.queue_processor, ghia.polling, ghia.network, ghia.naming, ghia.retry, ghia.repo_detect, ghia.integrations.gh_cli, ghia.integrations.docker_runner, ghia.ui.server, ghia.ui.terminal, ghia.ui.opener; print('OK')"
 ```
 
 Verifies every runtime module loads cleanly.

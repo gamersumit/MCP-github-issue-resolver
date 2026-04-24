@@ -2,14 +2,15 @@
 # github-issue-agent — one-command local installer (TRD-007).
 #
 # Creates a virtualenv under ./.venv, installs runtime + dev deps,
-# runs the setup wizard to collect the user's GitHub token + repo, and
+# runs the setup wizard (which auto-detects the repo from git remote
+# get-url origin and reuses your existing `gh` CLI auth), and
 # (best-effort) registers the MCP server with Claude Code.
 #
 # Safe to re-run: pip + venv are idempotent, and the wizard loads any
-# existing config file as defaults. We never push to remote or modify
+# existing per-repo config as defaults. We never push to remote or modify
 # anything outside the repo directory + ~/.config/github-issue-agent/.
 #
-# Requirements: Python 3.10+ and pip on $PATH.
+# Requirements: Python 3.10+, pip, git, and `gh` CLI on $PATH.
 # Optional: claude CLI (for automatic MCP registration).
 
 set -euo pipefail

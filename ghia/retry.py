@@ -25,8 +25,8 @@ from typing import Any, Awaitable, Callable
 
 from ghia.app import GhiaApp
 from ghia.errors import ToolResponse
-from ghia.integrations.github import GitHubClientError
-from ghia.tools.issues import _get_client
+from ghia.integrations import gh_cli
+from ghia.integrations.gh_cli import GhAuthError
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +54,8 @@ async def _label_human_review(
 ) -> None:
     """Best-effort: label the active issue for human attention.
 
-    Swallows :class:`GitHubClientError` because a labelling failure
-    on the failure path would mask the real test/lint failure the
+    Swallows :class:`GhAuthError` because a labelling failure on
+    the failure path would mask the real test/lint failure the
     caller actually needs to see.  Logs the failure at WARNING so
     operators can still investigate.
     """
@@ -69,9 +69,8 @@ async def _label_human_review(
         return
 
     try:
-        client = _get_client(app)
-        await client.add_label(issue_number, label)
-    except GitHubClientError as exc:
+        await gh_cli.add_label(app.repo_full_name, issue_number, label)
+    except GhAuthError as exc:
         # Don't escalate — the original failure is what the caller
         # cares about.  We log so the failure isn't invisible.
         logger.warning(

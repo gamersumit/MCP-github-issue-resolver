@@ -1,8 +1,10 @@
-"""Pull-request creation tool (TRD-024).
+"""Pull-request creation tool (TRD-024, v0.2 refactor).
 
 One MCP tool — :func:`create_pr` — that opens a PR for the current
-feature branch using the ``gh`` CLI when available and PyGithub as
-the fallback.
+feature branch via the ``gh`` CLI integration.  v0.2 dropped the
+PyGithub fallback path because the new architecture *requires* gh
+(it's the auth boundary), so falling back to anything else doesn't
+make sense.
 
 Two design choices worth flagging:
 
@@ -32,29 +34,20 @@ Satisfies REQ-018, REQ-021.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
-import shutil
-import subprocess
-from typing import Any, Optional
+from typing import Optional
 
 from ghia.app import GhiaApp
 from ghia.errors import ErrorCode, ToolResponse, err, ok, wrap_tool
-from ghia.integrations.github import GitHubClientError
+from ghia.integrations import gh_cli
+from ghia.integrations.gh_cli import GhAuthError, GhUnavailable
 from ghia.naming import pr_title
 from ghia.tools.git import get_current_branch, get_default_branch
-from ghia.tools.issues import _get_client
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["create_pr"]
-
-
-# Generous cap: ``gh pr create`` does a network round-trip and may
-# need to wait on GitHub.  Two minutes is comfortable for the slow
-# path without letting a wedged CLI hang us forever.
-_GH_TIMEOUT_S = 120
 
 
 def _build_close_marker_regex(issue_number: int) -> re.Pattern[str]:
@@ -90,148 +83,6 @@ def _ensure_close_marker(body: str, issue_number: int) -> str:
     return f"{body.rstrip()}\n\n{suffix}"
 
 
-def _parse_pr_url(stdout: str) -> Optional[str]:
-    """Pull the last non-empty line out of ``gh pr create`` stdout.
-
-    ``gh`` (≥ 2.0) prints the PR URL on its own line as the final
-    output.  Newer versions occasionally prepend a "Creating pull
-    request..." progress line, so we always take the last non-empty
-    line rather than the first.
-    """
-
-    lines = [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
-    return lines[-1] if lines else None
-
-
-def _parse_pr_number(url: Optional[str]) -> Optional[int]:
-    """Extract the trailing PR number from ``.../pull/<n>``.
-
-    Returns ``None`` if the URL doesn't look like a GitHub PR URL —
-    we still return the URL string in that case, so callers see
-    *something* useful.
-    """
-
-    if not url:
-        return None
-    match = re.search(r"/pull/(\d+)", url)
-    if not match:
-        return None
-    try:
-        return int(match.group(1))
-    except ValueError:
-        return None
-
-
-async def _create_via_gh(
-    app: GhiaApp,
-    *,
-    title: str,
-    body: str,
-    base: str,
-    head: str,
-    draft: bool,
-) -> ToolResponse:
-    """Path 1: ``gh pr create``.  Returns a structured ToolResponse."""
-
-    argv: list[str] = [
-        "gh",
-        "pr",
-        "create",
-        "--title",
-        title,
-        "--body",
-        body,
-        "--base",
-        base,
-        "--head",
-        head,
-    ]
-    if draft:
-        argv.append("--draft")
-
-    def _call() -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            argv,
-            cwd=str(app.repo_root),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_GH_TIMEOUT_S,
-        )
-
-    try:
-        proc = await asyncio.to_thread(_call)
-    except subprocess.TimeoutExpired:
-        return err(ErrorCode.NETWORK_ERROR, f"gh pr create timed out after {_GH_TIMEOUT_S}s")
-    except FileNotFoundError:
-        # Defensive — caller already shutil.which'd, but a race
-        # could remove gh between then and now.
-        return err(ErrorCode.GIT_ERROR, "gh executable not found on PATH")
-
-    if proc.returncode != 0:
-        stderr_text = (proc.stderr or "").strip()
-        # ``gh`` returns "a pull request for branch ... already
-        # exists" on duplicates — sniff the text and remap to the
-        # right code so callers can branch cleanly.
-        if "already exists" in stderr_text.lower():
-            return err(ErrorCode.PR_EXISTS, stderr_text or "PR already exists")
-        return err(
-            ErrorCode.GIT_ERROR,
-            stderr_text or f"gh pr create exited with code {proc.returncode}",
-        )
-
-    url = _parse_pr_url(proc.stdout)
-    number = _parse_pr_number(url)
-    return ok({
-        "url": url,
-        "number": number,
-        "draft": draft,
-        "head": head,
-        "base": base,
-        "body_used": body,
-    })
-
-
-async def _create_via_pygithub(
-    app: GhiaApp,
-    *,
-    title: str,
-    body: str,
-    base: str,
-    head: str,
-    draft: bool,
-) -> ToolResponse:
-    """Path 2: PyGithub fallback.  Used when ``gh`` isn't on PATH."""
-
-    client = _get_client(app)
-    try:
-        result = await client.create_pull_request(
-            head=head,
-            base=base,
-            title=title,
-            body=body,
-            draft=draft,
-        )
-    except GitHubClientError as exc:
-        # PyGithub returns 422 for duplicate PRs and our generic
-        # mapper turns that into NETWORK_ERROR.  Sniff the message
-        # so the structured code matches the gh-CLI path.
-        msg_lower = exc.message.lower()
-        if "already exists" in msg_lower or "pull request already" in msg_lower:
-            return err(ErrorCode.PR_EXISTS, exc.message)
-        return err(exc.code, exc.message)
-
-    payload = {
-        "url": result.get("html_url"),
-        "number": result.get("number"),
-        "draft": draft,
-        "head": head,
-        "base": base,
-        "body_used": body,
-    }
-    return ok(payload)
-
-
 @wrap_tool
 async def create_pr(
     app: GhiaApp,
@@ -242,7 +93,7 @@ async def create_pr(
     base: Optional[str] = None,
     draft: Optional[bool] = None,
 ) -> ToolResponse:
-    """Open a PR for the current feature branch.
+    """Open a PR for the current feature branch via ``gh pr create``.
 
     Args:
         issue_number: Issue this PR resolves.  Used for both the
@@ -301,22 +152,32 @@ async def create_pr(
     final_title = title if title and title.strip() else pr_title(issue_number, "")
     final_body = _ensure_close_marker(body or "", issue_number)
 
-    # Prefer the gh CLI; fall back to PyGithub when gh isn't on
-    # PATH.  Both paths produce the same response shape.
-    if shutil.which("gh") is not None:
-        return await _create_via_gh(
-            app,
+    # Hand off to gh_cli — every error mapping (PR_EXISTS,
+    # REPO_NOT_FOUND, RATE_LIMITED, …) lives there so this layer
+    # only needs to translate the result shape.
+    try:
+        result = await gh_cli.create_pull_request(
+            app.repo_full_name,
             title=final_title,
             body=final_body,
             base=base,
             head=head,
             draft=draft,
         )
-    return await _create_via_pygithub(
-        app,
-        title=final_title,
-        body=final_body,
-        base=base,
-        head=head,
-        draft=draft,
-    )
+    except GhUnavailable as exc:
+        # The new model REQUIRES gh — there's no PyGithub fallback
+        # to fall through to.  We surface this as GIT_ERROR (closest
+        # existing code; the enum is closed) with an actionable
+        # message so the user knows what to install.
+        return err(ErrorCode.GIT_ERROR, str(exc))
+    except GhAuthError as exc:
+        return err(exc.code, exc.message)
+
+    return ok({
+        "url": result.get("html_url"),
+        "number": result.get("number"),
+        "draft": draft,
+        "head": head,
+        "base": base,
+        "body_used": final_body,
+    })

@@ -116,11 +116,13 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
 
         now = _iso_now()
         # TRD-023: replace _DEFAULT_BRANCH_STUB with detected branch.
+        # v0.2: repo comes from app.repo_full_name (auto-detected),
+        # not app.config.repo (which no longer exists).
         new_state = SessionState.model_validate({
             **current.model_dump(),
             "status": "active",
             "mode": current.mode,  # preserve any prior set_mode
-            "repo": app.config.repo,
+            "repo": app.repo_full_name,
             "session_started": now,
             "discovered_conventions": discovered,
             "default_branch": _DEFAULT_BRANCH_STUB,
@@ -131,7 +133,7 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
     # mutating state.
     queue_summary = format_queue_summary(new_state.queue)
     protocol = render_protocol(
-        repo=new_state.repo or app.config.repo,
+        repo=new_state.repo or app.repo_full_name,
         mode=new_state.mode,
         default_branch=new_state.default_branch or _DEFAULT_BRANCH_STUB,
         discovered_conventions=discovered,

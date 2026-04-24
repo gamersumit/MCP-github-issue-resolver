@@ -12,10 +12,9 @@ pin four invariants that are load-bearing for safe boot:
   is only allowed to start in response to an explicit
   ``issue_agent_start`` call; if ``create_app`` ever begins doing it
   itself, idle-by-default is silently broken.
-* The redaction filter installed on the root logger actually functions
-  end-to-end: a record containing the configured token is scrubbed.
-  The existing test only asserts the filter's *presence*, which would
-  pass even if the filter were a no-op.
+* The redaction filter installed on the root logger actually scrubs
+  token-shaped substrings via its regex safety net (v0.2: no token is
+  registered, so the regex branch is the only line of defense).
 * A relative ``repo_root`` path is normalized to absolute. Downstream
   path-guard logic relies on ``app.repo_root.is_absolute()`` so the
   factory must enforce it at the boundary.
@@ -65,14 +64,12 @@ def _reset_redaction_state() -> Iterator[None]:
 def _write_valid_config(path: Path, **overrides: object) -> dict:
     """Mirror the helper used by ``test_app.py`` (kept local — not exported).
 
+    v0.2 schema: no token, no repo (auto-detected from git remote).
     Duplicating the literal here keeps these tests independent of any
-    refactor of ``test_app.py`` and makes the token shape obvious at
-    the point of use.
+    refactor of ``test_app.py``.
     """
 
     payload: dict = {
-        "token": "ghp_" + "a" * 36,
-        "repo": "octo/hello",
         "label": "ai-fix",
         "mode": "semi",
         "poll_interval_min": 30,
@@ -101,7 +98,9 @@ async def test_create_app_returns_wired_ghia_app(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
-    app = await create_app(repo_root=repo_root, config_path=cfg_path)
+    app = await create_app(
+        repo_root=repo_root, config_path=cfg_path, repo_full_name="octo/hello"
+    )
 
     # All four "wired" fields populated — no None placeholders.
     assert app.config is not None
@@ -134,42 +133,44 @@ async def test_create_app_does_not_start_polling_implicitly(tmp_path: Path) -> N
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
-    app = await create_app(repo_root=repo_root, config_path=cfg_path)
+    app = await create_app(
+        repo_root=repo_root, config_path=cfg_path, repo_full_name="octo/hello"
+    )
 
     # Direct attribute access (not a getattr default) so the test FAILS
     # loudly if the field is removed from the dataclass.
     assert app._polling_task is None
 
 
-async def test_create_app_installs_redaction_filter_on_root_logger(
+async def test_create_app_installed_filter_scrubs_token_shaped_strings(
     tmp_path: Path,
 ) -> None:
-    """The installed filter must actually scrub the registered token.
+    """The installed filter must actually scrub token-shaped substrings.
 
-    ``test_create_app_installs_redaction_filter`` only checks that *a*
-    RedactionFilter exists on the root logger. That assertion would
-    pass even if the filter were misconfigured (e.g. token never
-    registered). Here we drive a real log record through and assert
-    the token is removed from the captured output.
+    v0.2 dropped the PAT model — the agent no longer registers a
+    specific token at create_app time.  But the redaction filter is
+    still installed defensively so that if any subsystem (gh stderr,
+    a misconfigured logger) accidentally echoes a token-shaped
+    substring, the regex safety net catches it.
+
+    We drive a synthetic token-shaped string through the root logger
+    and assert that the regex branch of the filter scrubs it.
     """
 
-    token = "ghp_" + "z" * 40  # distinct from default fixture token
     cfg_path = tmp_path / "cfg.json"
-    _write_valid_config(cfg_path, token=token)
+    _write_valid_config(cfg_path)
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
-    await create_app(repo_root=repo_root, config_path=cfg_path)
+    await create_app(
+        repo_root=repo_root, config_path=cfg_path, repo_full_name="octo/hello"
+    )
 
-    # Python logging quirk: a Filter attached to a Logger only fires for
-    # records logged DIRECTLY to that logger, not for records that
-    # propagate up from sub-loggers. That's why we log to the root
-    # logger here (root.warning(...)) instead of getLogger("ghia.x") —
-    # we're verifying the filter create_app installed on root scrubs
-    # records that hit root, which is the only place such a filter can
-    # fire. Sub-logger coverage is provided by handler-level filters in
-    # the conftest fixture and by ghia.integrations.github attaching
-    # install_filter() per-logger as needed.
+    # Token-shaped string that matches the documented GitHub prefix
+    # regex but was NEVER registered via ``set_token``.  The regex
+    # safety net is the only thing that can scrub it — exactly the
+    # property we want to verify.
+    fake_token = "ghp_" + "z" * 40
     root = logging.getLogger()
     previous_level = root.level
     root.setLevel(logging.DEBUG)
@@ -180,15 +181,15 @@ async def test_create_app_installs_redaction_filter_on_root_logger(
     handler.setFormatter(logging.Formatter("%(message)s"))
     root.addHandler(handler)
     try:
-        root.warning("leaking token=%s here", token)
+        root.warning("leaking token=%s here", fake_token)
         handler.flush()
         output = buf.getvalue()
     finally:
         root.removeHandler(handler)
         root.setLevel(previous_level)
 
-    assert token not in output, (
-        f"raw token leaked into log output: {output!r}"
+    assert fake_token not in output, (
+        f"raw token-shaped string leaked into log output: {output!r}"
     )
     assert redaction.REDACTED in output, (
         f"expected redaction marker in {output!r}"
@@ -265,7 +266,9 @@ async def test_create_app_resolves_repo_root_to_absolute(
     relative = Path("repo")
     assert not relative.is_absolute(), "precondition: input must be relative"
 
-    app = await create_app(repo_root=relative, config_path=cfg_path)
+    app = await create_app(
+        repo_root=relative, config_path=cfg_path, repo_full_name="octo/hello"
+    )
 
     assert app.repo_root.is_absolute(), (
         f"create_app must resolve relative paths; got {app.repo_root!r}"

@@ -1,12 +1,14 @@
-"""Composition-root test (TRD-011 INFRA).
+"""Composition-root test (TRD-011 INFRA, v0.2 refactor).
 
 Covers:
-* ``create_app`` with a valid config file returns a :class:`GhiaApp`.
-* The redaction filter is installed on the root logger during init
-  (verify via ``logging.getLogger().filters``).
-* ``create_app`` surfaces ``ConfigMissingError`` for a missing file
-  so callers can handle the "wizard hasn't run yet" case.
+* ``create_app`` with a valid per-repo config returns a :class:`GhiaApp`.
+* ``create_app`` surfaces ``ConfigMissingError`` for a missing file.
+* The redaction filter is installed on the root logger during init.
+* ``app.repo_full_name`` reflects the (overridden in test) detected slug.
 * The session file path is anchored at ``<repo_root>/state/session.json``.
+* Auto-detection via ``git remote get-url origin`` is bypassed via the
+  ``repo_full_name`` keyword override (production code uses
+  :mod:`ghia.repo_detect`).
 """
 
 from __future__ import annotations
@@ -17,34 +19,27 @@ from pathlib import Path
 
 import pytest
 
-from ghia import redaction
 from ghia.app import GhiaApp, create_app
 from ghia.config import ConfigMissingError
 from ghia.redaction import RedactionFilter
 
 
 @pytest.fixture(autouse=True)
-def _reset_token_and_filters() -> None:
-    """Clear redaction state and any filters left behind by other tests."""
+def _reset_filters() -> None:
+    """Strip filters left by other tests."""
 
-    redaction.set_token(None)
     root = logging.getLogger()
     before = list(root.filters)
     yield
-    # Remove any RedactionFilter instances this test added so we don't
-    # leak state across the suite.
     for f in list(root.filters):
         if f not in before:
             root.removeFilter(f)
-    redaction.set_token(None)
 
 
 def _write_valid_config(path: Path, **overrides: object) -> dict[str, object]:
-    """Write a minimal but valid config JSON at ``path``.  Returns its dict."""
+    """Write a minimal but valid per-repo config JSON at ``path``."""
 
-    payload = {
-        "token": "ghp_" + "a" * 36,
-        "repo": "octo/hello",
+    payload: dict[str, object] = {
         "label": "ai-fix",
         "mode": "semi",
         "poll_interval_min": 30,
@@ -62,10 +57,15 @@ async def test_create_app_with_valid_config_returns_app(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
-    app = await create_app(repo_root=repo_root, config_path=cfg_path)
+    app = await create_app(
+        repo_root=repo_root,
+        config_path=cfg_path,
+        repo_full_name="octo/hello",
+    )
 
     assert isinstance(app, GhiaApp)
-    assert app.config.repo == "octo/hello"
+    assert app.config.label == "ai-fix"
+    assert app.repo_full_name == "octo/hello"
     assert app.repo_root == repo_root.resolve()
     assert isinstance(app.logger, logging.Logger)
 
@@ -77,24 +77,16 @@ async def test_create_app_installs_redaction_filter(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
-    await create_app(repo_root=repo_root, config_path=cfg_path)
+    await create_app(
+        repo_root=repo_root,
+        config_path=cfg_path,
+        repo_full_name="octo/hello",
+    )
 
     root = logging.getLogger()
     assert any(isinstance(f, RedactionFilter) for f in root.filters), (
         f"expected a RedactionFilter on root logger; got {root.filters!r}"
     )
-
-
-async def test_create_app_registers_token_for_redaction(tmp_path: Path) -> None:
-    cfg_path = tmp_path / "cfg.json"
-    token = "ghp_" + "b" * 36
-    _write_valid_config(cfg_path, token=token)
-
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-
-    await create_app(repo_root=repo_root, config_path=cfg_path)
-    assert redaction.get_token() == token
 
 
 async def test_create_app_with_missing_config_raises(tmp_path: Path) -> None:
@@ -105,6 +97,7 @@ async def test_create_app_with_missing_config_raises(tmp_path: Path) -> None:
         await create_app(
             repo_root=repo_root,
             config_path=tmp_path / "does_not_exist.json",
+            repo_full_name="octo/hello",
         )
 
 
@@ -115,27 +108,28 @@ async def test_create_app_session_path_under_repo_root(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
-    app = await create_app(repo_root=repo_root, config_path=cfg_path)
+    app = await create_app(
+        repo_root=repo_root,
+        config_path=cfg_path,
+        repo_full_name="octo/hello",
+    )
 
     # SessionStore's path is public; we expect it under repo_root/state/
     assert app.session.path == repo_root.resolve() / "state" / "session.json"
 
 
-async def test_create_app_uses_default_config_path_when_home_set(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify the HOME-as-config-root pattern works end-to-end."""
+async def test_create_app_rejects_malformed_repo_full_name(tmp_path: Path) -> None:
+    """``repo_full_name`` must contain a slash — single-token form is wrong."""
 
-    # Point HOME at tmp_path so default_config_path resolves here.
-    monkeypatch.setenv("HOME", str(tmp_path))
-    # Path.home() honors HOME on POSIX; this makes the default resolve
-    # to ``<tmp_path>/.config/github-issue-agent/config.json``.
-    default_cfg = tmp_path / ".config" / "github-issue-agent" / "config.json"
-    _write_valid_config(default_cfg)
+    cfg_path = tmp_path / "cfg.json"
+    _write_valid_config(cfg_path)
 
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
-    app = await create_app(repo_root=repo_root)
-    assert app.config.repo == "octo/hello"
+    with pytest.raises(ValueError):
+        await create_app(
+            repo_root=repo_root,
+            config_path=cfg_path,
+            repo_full_name="no-slash",
+        )

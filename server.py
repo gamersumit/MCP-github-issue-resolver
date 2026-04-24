@@ -1,4 +1,4 @@
-"""FastMCP entrypoint (TRD-011).
+"""FastMCP entrypoint (TRD-011, v0.2 refactor).
 
 Exposes the Cluster 3 control tools (``issue_agent_start``,
 ``issue_agent_stop``, ``issue_agent_status``, ``issue_agent_set_mode``,
@@ -8,10 +8,16 @@ idle-by-default: starting the process does NOT call
 
 The :class:`ghia.app.GhiaApp` instance is built lazily on first tool
 call so that ``claude mcp list`` and ``claude mcp add ...`` succeed
-even when the user has not yet run the setup wizard and therefore has
-no ``~/.config/github-issue-agent/config.json``.  When that happens we
-return ``ToolResponse(err=CONFIG_MISSING, ...)`` instead of crashing
-the process.
+even when the user has not yet run the setup wizard.  The lazy build
+covers two structured-error paths:
+
+* **Repo not detected** — the cwd isn't a git repo or has no origin.
+  Surfaces as ``INVALID_INPUT`` with the detection error message.
+* **Config missing** — the wizard hasn't been run for this repo.
+  Surfaces as ``CONFIG_MISSING`` with a hint to run the wizard.
+
+In either case the process keeps running so the next call (in a
+different cwd, or after the wizard runs) can succeed.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from fastmcp import FastMCP
 from ghia.app import GhiaApp, create_app
 from ghia.config import ConfigMissingError
 from ghia.errors import ErrorCode, ToolResponse, err
+from ghia.repo_detect import RepoDetectionError
 from ghia.tools import control
 
 logger = logging.getLogger(__name__)
@@ -57,11 +64,18 @@ async def _get_app_or_error() -> tuple[Optional[GhiaApp], Optional[ToolResponse]
             return _app, None
         try:
             _app = await create_app(repo_root=Path.cwd())
+        except RepoDetectionError as exc:
+            # Distinct from CONFIG_MISSING — the user opened Claude
+            # Code somewhere that isn't a github-hosted git repo.
+            # INVALID_INPUT is the closest existing error code.
+            logger.info("repo detection failed: %s", exc)
+            return None, err(ErrorCode.INVALID_INPUT, str(exc))
         except ConfigMissingError as exc:
             logger.info("create_app failed: %s", exc)
             return None, err(
                 ErrorCode.CONFIG_MISSING,
-                "Run /issue-agent setup first to create the config file.",
+                "No per-repo config for this repo. "
+                "Run `python -m setup_wizard` from the repo dir to create one.",
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("unexpected error initializing app")

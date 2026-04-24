@@ -1,4 +1,4 @@
-"""Issue-related MCP tools (TRD-016 + TRD-017).
+"""Issue-related MCP tools (TRD-016 + TRD-017, v0.2 refactor).
 
 Five user-visible tools that read and mutate GitHub issues plus a
 companion duplicate-PR detector:
@@ -14,18 +14,19 @@ companion duplicate-PR detector:
   *both* without ever auto-skipping [REQ-013b]
 
 Every entry point is wrapped with :func:`ghia.errors.wrap_tool` so a
-:class:`ghia.integrations.github.GitHubClientError` (or any other
+:class:`ghia.integrations.gh_cli.GhAuthError` (or any other
 exception) becomes a structured ``ToolResponse(err=...)`` rather than
 reaching the MCP transport.
 
-The :class:`GitHubClient` is built lazily and cached on the
-:class:`GhiaApp` so a tool call doesn't pay the construction cost
-every time, but a config change (new repo or new token) is detected
-and triggers a rebuild on the next call.
+v0.2 change: every GitHub-API call routes through
+:mod:`ghia.integrations.gh_cli` (subprocess to ``gh``) rather than
+PyGithub.  The repo is read off ``app.repo_full_name`` (auto-detected
+from ``git remote get-url origin``) instead of a config field.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import subprocess
@@ -33,7 +34,8 @@ from typing import Any, Optional
 
 from ghia.app import GhiaApp
 from ghia.errors import ErrorCode, ToolResponse, err, ok, wrap_tool
-from ghia.integrations.github import GitHubClient, GitHubClientError
+from ghia.integrations import gh_cli
+from ghia.integrations.gh_cli import GhAuthError
 
 logger = logging.getLogger(__name__)
 
@@ -112,35 +114,6 @@ def _annotate(issue: dict[str, Any]) -> dict[str, Any]:
 
 
 # ----------------------------------------------------------------------
-# Lazy client accessor
-# ----------------------------------------------------------------------
-
-
-def _get_client(app: GhiaApp) -> GitHubClient:
-    """Return a cached :class:`GitHubClient` matching the current config.
-
-    We stash the client on a private attribute of ``app`` (the dataclass
-    permits arbitrary attribute assignment because it isn't ``frozen``).
-    The cache key is ``(token, repo)`` so a config swap mid-session
-    produces a fresh client on the very next call.
-    """
-
-    cached: Optional[GitHubClient] = getattr(app, "_github_client", None)
-    cache_key: Optional[tuple[str, str]] = getattr(
-        app, "_github_client_key", None
-    )
-    current_key = (app.config.token, app.config.repo)
-
-    if cached is not None and cache_key == current_key:
-        return cached
-
-    client = GitHubClient(token=app.config.token, repo_full_name=app.config.repo)
-    setattr(app, "_github_client", client)
-    setattr(app, "_github_client_key", current_key)
-    return client
-
-
-# ----------------------------------------------------------------------
 # Read tools
 # ----------------------------------------------------------------------
 
@@ -165,10 +138,11 @@ async def list_issues(
     else:
         effective_label = label
 
-    client = _get_client(app)
     try:
-        raw_issues = await client.list_issues(label=effective_label)
-    except GitHubClientError as exc:
+        raw_issues = await gh_cli.list_issues(
+            app.repo_full_name, label=effective_label
+        )
+    except GhAuthError as exc:
         return err(exc.code, exc.message)
 
     enriched = [_annotate(i) for i in raw_issues]
@@ -179,10 +153,9 @@ async def list_issues(
 async def get_issue(app: GhiaApp, number: int) -> ToolResponse:
     """Fetch a single issue by number, with derived priority."""
 
-    client = _get_client(app)
     try:
-        raw = await client.get_issue(number=number)
-    except GitHubClientError as exc:
+        raw = await gh_cli.get_issue(app.repo_full_name, number=number)
+    except GhAuthError as exc:
         return err(exc.code, exc.message)
     return ok(_annotate(raw))
 
@@ -256,10 +229,11 @@ async def post_issue_comment(
             "comment body must be a non-empty string",
         )
 
-    client = _get_client(app)
     try:
-        result = await client.post_issue_comment(number=number, body=body)
-    except GitHubClientError as exc:
+        result = await gh_cli.post_issue_comment(
+            app.repo_full_name, number=number, body=body
+        )
+    except GhAuthError as exc:
         return err(exc.code, exc.message)
     return ok(result)
 
@@ -354,12 +328,9 @@ async def check_issue_has_open_pr(
     branch signal" — they must not crash the detector.
     """
 
-    import asyncio
-
-    client = _get_client(app)
     try:
-        prs = await client.list_open_prs()
-    except GitHubClientError as exc:
+        prs = await gh_cli.list_open_prs(app.repo_full_name)
+    except GhAuthError as exc:
         return err(exc.code, exc.message)
 
     pr_signals = _scan_prs_for_issue(prs, number)

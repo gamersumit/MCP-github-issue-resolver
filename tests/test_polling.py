@@ -20,9 +20,9 @@ from ghia.app import GhiaApp, create_app
 
 
 def _write_config(path: Path) -> None:
+    """Write a minimal v0.2 per-repo config — no token, no repo field."""
+
     payload: dict[str, Any] = {
-        "token": "ghp_" + "p" * 36,
-        "repo": "octo/poll",
         "label": "ai-fix",
         "mode": "semi",
         "poll_interval_min": 5,
@@ -37,7 +37,9 @@ async def app(tmp_path: Path) -> AsyncIterator[GhiaApp]:
     _write_config(cfg_path)
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    instance = await create_app(repo_root=repo_root, config_path=cfg_path)
+    instance = await create_app(
+        repo_root=repo_root, config_path=cfg_path, repo_full_name="octo/poll"
+    )
     try:
         yield instance
     finally:

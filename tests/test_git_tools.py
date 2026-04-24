@@ -76,18 +76,13 @@ def _make_repo_with_branch(repo: Path, branch: str) -> None:
 
 
 def _make_app(repo: Path, tmp_path: Path) -> GhiaApp:
-    cfg = Config(
-        token="ghp_" + "x" * 36,
-        repo="octo/hello",
-        label="ai-fix",
-        mode="semi",
-        poll_interval_min=30,
-    )
+    cfg = Config(label="ai-fix", mode="semi", poll_interval_min=30)
     session_path = tmp_path / "session.json"
     return GhiaApp(
         config=cfg,
         session=SessionStore(session_path),
         repo_root=repo,
+        repo_full_name="octo/hello",
         logger=logging.getLogger("ghia-test-git"),
     )
 

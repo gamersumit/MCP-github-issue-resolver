@@ -1,7 +1,9 @@
-"""Retry-wrapper tests (TRD-027-TEST).
+"""Retry-wrapper tests (TRD-027-TEST, v0.2 refactor).
 
 The retry decorator is purely Python-level — no I/O, no
-subprocesses — so all mocking is in-process.
+subprocesses — so all mocking is in-process.  v0.2 swap: the labelling
+side-effect now goes through ``gh_cli.add_label`` directly (no
+``_get_client`` middleman) so we patch that coroutine.
 
 Coverage:
 * exactly N attempts on persistent failure
@@ -26,14 +28,13 @@ from ghia import retry
 from ghia.app import GhiaApp
 from ghia.config import Config
 from ghia.errors import ErrorCode, ToolResponse, err, ok
-from ghia.integrations.github import GitHubClientError
+from ghia.integrations import gh_cli
+from ghia.integrations.gh_cli import GhAuthError
 from ghia.session import SessionStore
 
 
 def _make_app(tmp_path: Path) -> GhiaApp:
     cfg = Config(
-        token="ghp_" + "x" * 36,
-        repo="octo/hello",
         label="ai-fix",
         mode="full",
         poll_interval_min=30,
@@ -44,21 +45,25 @@ def _make_app(tmp_path: Path) -> GhiaApp:
         config=cfg,
         session=SessionStore(tmp_path / "session.json"),
         repo_root=repo,
+        repo_full_name="octo/hello",
         logger=logging.getLogger("ghia-test-retry"),
     )
 
 
-class _LabelClient:
-    """Minimal stand-in capturing add_label calls."""
+def _patch_add_label(
+    monkeypatch: pytest.MonkeyPatch, *, raises: Exception | None = None
+) -> list[tuple[str, int, str]]:
+    """Mock gh_cli.add_label and return the captured call list."""
 
-    def __init__(self, *, raises: Exception | None = None) -> None:
-        self.calls: list[tuple[int, str]] = []
-        self.raises = raises
+    calls: list[tuple[str, int, str]] = []
 
-    async def add_label(self, number: int, label: str) -> None:
-        self.calls.append((number, label))
-        if self.raises is not None:
-            raise self.raises
+    async def fake_add_label(repo: str, number: int, label: str) -> None:
+        calls.append((repo, number, label))
+        if raises is not None:
+            raise raises
+
+    monkeypatch.setattr(gh_cli, "add_label", fake_add_label)
+    return calls
 
 
 # ----------------------------------------------------------------------
@@ -70,8 +75,7 @@ async def test_three_attempts_max_on_persistent_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app = _make_app(tmp_path)
-
-    monkeypatch.setattr(retry, "_get_client", lambda _app: _LabelClient())
+    _patch_add_label(monkeypatch)
 
     counter = {"n": 0}
 
@@ -91,7 +95,7 @@ async def test_success_short_circuits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app = _make_app(tmp_path)
-    monkeypatch.setattr(retry, "_get_client", lambda _app: _LabelClient())
+    _patch_add_label(monkeypatch)
 
     counter = {"n": 0}
 
@@ -114,7 +118,7 @@ async def test_tool_error_response_treated_as_failure(
     """An err(...) response is also a failure for retry purposes."""
 
     app = _make_app(tmp_path)
-    monkeypatch.setattr(retry, "_get_client", lambda _app: _LabelClient())
+    _patch_add_label(monkeypatch)
 
     counter = {"n": 0}
 
@@ -135,7 +139,7 @@ async def test_success_without_passed_field_short_circuits(
     """A plain success payload (no `passed` key) counts as success."""
 
     app = _make_app(tmp_path)
-    monkeypatch.setattr(retry, "_get_client", lambda _app: _LabelClient())
+    _patch_add_label(monkeypatch)
 
     counter = {"n": 0}
 
@@ -160,8 +164,7 @@ async def test_human_review_label_applied_on_final_failure(
     app = _make_app(tmp_path)
     await app.session.update(active_issue=42)
 
-    fake = _LabelClient()
-    monkeypatch.setattr(retry, "_get_client", lambda _app: fake)
+    calls = _patch_add_label(monkeypatch)
 
     @retry.with_retries(max_attempts=3)
     async def fails(_app: GhiaApp) -> ToolResponse:
@@ -171,7 +174,7 @@ async def test_human_review_label_applied_on_final_failure(
 
     assert resp.success
     assert resp.data["passed"] is False
-    assert fake.calls == [(42, "human-review")]
+    assert calls == [("octo/hello", 42, "human-review")]
 
 
 async def test_label_failure_swallowed(
@@ -182,10 +185,10 @@ async def test_label_failure_swallowed(
     app = _make_app(tmp_path)
     await app.session.update(active_issue=99)
 
-    fake = _LabelClient(
-        raises=GitHubClientError(ErrorCode.RATE_LIMITED, "slow down")
+    calls = _patch_add_label(
+        monkeypatch,
+        raises=GhAuthError(ErrorCode.RATE_LIMITED, "slow down"),
     )
-    monkeypatch.setattr(retry, "_get_client", lambda _app: fake)
 
     @retry.with_retries(max_attempts=2)
     async def fails(_app: GhiaApp) -> ToolResponse:
@@ -196,7 +199,7 @@ async def test_label_failure_swallowed(
     resp = await fails(app)
     assert resp.success
     assert resp.data["passed"] is False
-    assert fake.calls == [(99, "human-review")]
+    assert calls == [("octo/hello", 99, "human-review")]
 
 
 async def test_no_active_issue_skips_labelling(
@@ -205,15 +208,14 @@ async def test_no_active_issue_skips_labelling(
     app = _make_app(tmp_path)
     # active_issue stays None.
 
-    fake = _LabelClient()
-    monkeypatch.setattr(retry, "_get_client", lambda _app: fake)
+    calls = _patch_add_label(monkeypatch)
 
     @retry.with_retries(max_attempts=2)
     async def fails(_app: GhiaApp) -> ToolResponse:
         return ok({"passed": False})
 
     await fails(app)
-    assert fake.calls == []
+    assert calls == []
 
 
 async def test_success_does_not_label(
@@ -222,15 +224,14 @@ async def test_success_does_not_label(
     app = _make_app(tmp_path)
     await app.session.update(active_issue=7)
 
-    fake = _LabelClient()
-    monkeypatch.setattr(retry, "_get_client", lambda _app: fake)
+    calls = _patch_add_label(monkeypatch)
 
     @retry.with_retries(max_attempts=3)
     async def succeed(_app: GhiaApp) -> ToolResponse:
         return ok({"passed": True})
 
     await succeed(app)
-    assert fake.calls == []
+    assert calls == []
 
 
 # ----------------------------------------------------------------------

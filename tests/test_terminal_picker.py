@@ -21,7 +21,6 @@ from ghia.errors import ErrorCode, err, ok
 from ghia.ui import terminal as terminal_picker
 
 
-_FAKE_TOKEN = "ghp_" + "q" * 36
 _REPO = "octo/hello"
 
 
@@ -38,9 +37,9 @@ def _reset_logging() -> None:
 
 
 def _write_config(path: Path, **overrides: Any) -> None:
+    """v0.2 per-repo config — no token, no repo field."""
+
     payload: dict[str, Any] = {
-        "token": _FAKE_TOKEN,
-        "repo": _REPO,
         "label": "ai-fix",
         "mode": "semi",
         "poll_interval_min": 30,
@@ -56,7 +55,9 @@ async def app(tmp_path: Path) -> GhiaApp:
     _write_config(cfg_path)
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    return await create_app(repo_root=repo_root, config_path=cfg_path)
+    return await create_app(
+        repo_root=repo_root, config_path=cfg_path, repo_full_name=_REPO
+    )
 
 
 def _make_issues(numbers: list[int]) -> list[dict[str, Any]]:
@@ -229,7 +230,9 @@ async def test_mode_default_honours_app_config_when_full(
     _write_config(cfg_path, mode="full")
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    app = await create_app(repo_root=repo_root, config_path=cfg_path)
+    app = await create_app(
+        repo_root=repo_root, config_path=cfg_path, repo_full_name=_REPO
+    )
 
     _patch_list(monkeypatch, [1, 2])
 

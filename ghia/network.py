@@ -1,8 +1,7 @@
 """Network / rate-limit helpers (TRD-031).
 
-Centralizes two concerns that previously lived inline in
-:mod:`ghia.integrations.github` and were destined to be re-implemented
-in every module that touches the network:
+Centralizes two concerns that have to be done identically across the
+codebase:
 
 1. **Rate-limit reset formatting** — turn an epoch into a stable
    "resets at <iso> (in <relative>)" string so user-facing messages
@@ -15,9 +14,13 @@ in every module that touches the network:
 
 Token safety: every classified message is run through
 :func:`ghia.redaction.scrub` before it is returned, so even an
-exception whose payload includes the live token (e.g. an httpx
-``ConnectError`` carrying the URL) cannot leak secrets to a tool
-response or a log line.
+exception whose payload includes a live token cannot leak secrets to
+a tool response or a log line.
+
+The httpx import is lazy and optional; nothing in the v0.2 runtime
+calls this from a context that has httpx installed (gh CLI is the
+network boundary now), but the helper stays in place because tests
+and any future direct-HTTP caller can still benefit.
 
 Satisfies REQ-024.
 """
