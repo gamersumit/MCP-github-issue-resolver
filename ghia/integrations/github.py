@@ -433,3 +433,46 @@ class GitHubClient:
             return [_pr_to_dict(pr) for pr in repo.get_pulls(state="open")]
 
         return await self._call(_do)
+
+    async def create_pull_request(
+        self,
+        *,
+        head: str,
+        base: str,
+        title: str,
+        body: str,
+        draft: bool = False,
+    ) -> dict[str, Any]:
+        """Create a pull request and return its essential fields.
+
+        Used as the PyGithub fallback path in :mod:`ghia.tools.pr`
+        when the ``gh`` CLI isn't on PATH.  PyGithub raises
+        :class:`GithubException` with status 422 when a PR for the
+        same head/base already exists; :func:`_map_exception`
+        currently maps that to ``NETWORK_ERROR``, so the caller is
+        responsible for sniffing the message text and re-coding it
+        as ``PR_EXISTS`` (mirrors what we do for the gh-CLI path).
+
+        Returns ``{number, html_url, draft, head, base}``.
+        """
+
+        def _do() -> dict[str, Any]:
+            repo = self._get_repo()
+            pr = repo.create_pull(
+                title=title,
+                body=body,
+                head=head,
+                base=base,
+                draft=draft,
+            )
+            return {
+                "number": pr.number,
+                "html_url": pr.html_url,
+                # Echo back the inputs so callers don't have to
+                # re-correlate the result with their request.
+                "draft": draft,
+                "head": head,
+                "base": base,
+            }
+
+        return await self._call(_do)
