@@ -46,11 +46,18 @@ dev = [
 ]
 
 [project.scripts]
-ghia = "ghia.app:main"
+github-issue-agent = "server:main"
 
 [tool.setuptools.packages.find]
 include = ["ghia*"]
 exclude = ["tests*", "docs*", "github-issue-agent*"]
+
+# server.py and setup_wizard.py live at the repo root, not under ghia/.
+# Listing them as py-modules makes `pip install .` install them so the
+# `github-issue-agent = "server:main"` console script resolves and
+# `python -m setup_wizard` works for users who only have the wheel.
+[tool.setuptools]
+py-modules = ["server", "setup_wizard"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"

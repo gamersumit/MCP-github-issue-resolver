@@ -32,9 +32,15 @@ Thumbs.db
 github-issue-agent/config.json
 config.json
 
-# Runtime state
-github-issue-agent/state/session.json
-state/session.json
+# Runtime state — session.json + rotated backups (session.json.bak-*)
+github-issue-agent/state/
+state/
+
+# Beads issue-tracker SQLite databases (the .jsonl is committed)
+.beads/*.db
+.beads/*.db-journal
+.beads/*.db-wal
+.beads/*.db-shm
 
 # Logs
 *.log
