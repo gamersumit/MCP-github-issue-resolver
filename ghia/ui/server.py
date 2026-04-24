@@ -27,12 +27,15 @@ Design notes:
   :func:`run_ui_server` — never ``0.0.0.0`` — because exposing the
   picker (which can write to the agent's session) on a non-loopback
   interface is a security hazard.  This is a hard rule, not a default.
-* The picker HTML is resolved relative to ``<repo_root>/ui_static``
-  where ``<repo_root>`` is the package install location (``ghia/``'s
-  parent's parent, since this file lives at ``ghia/ui/server.py``).
-  If the file is missing — for example because the package was
-  installed without the static asset — ``GET /`` returns a 503 with a
-  structured error body so the failure is visible rather than silent.
+* The picker HTML ships *inside* the package at
+  ``ghia/ui_static/picker.html`` and is declared as package-data in
+  ``pyproject.toml`` so wheel installs include it.  We resolve it
+  relative to ``ghia/`` (this file's parent's parent — ``ghia/ui``'s
+  parent).  A legacy repo-root location (``<repo_root>/ui_static``) is
+  consulted as a fallback so editable installs whose working tree
+  predates the move keep functioning.  If the file is missing entirely
+  ``GET /`` returns a 503 with a structured error body so the failure
+  is visible rather than silent.
 """
 
 from __future__ import annotations
@@ -72,15 +75,38 @@ UI_BIND_HOST: str = "127.0.0.1"
 
 
 def picker_html_path() -> Path:
-    """Resolve ``ui_static/picker.html`` relative to the package root.
+    """Resolve ``picker.html`` from the bundled static-assets directory.
 
-    ``__file__`` is ``<repo_root>/ghia/ui/server.py``; the static asset
-    lives at ``<repo_root>/ui_static/picker.html``.  We compute the
-    path lazily (each call) so a test that patches ``__file__`` or
-    runs from an editable install picks up the right location.
+    ``__file__`` is ``<install_dir>/ghia/ui/server.py``.
+
+    Resolution order:
+
+    1. **Package-internal** (``<install_dir>/ghia/ui_static/picker.html``):
+       this is the canonical post-packaging-fix location.  The asset
+       ships inside the wheel courtesy of the
+       ``[tool.setuptools.package-data]`` block in ``pyproject.toml``.
+    2. **Legacy repo-root** (``<repo_root>/ui_static/picker.html``):
+       kept as a fallback so editable installs whose working tree still
+       has the old layout keep working.
+
+    Computed lazily (each call) so a test that patches ``__file__`` or
+    runs from an editable install picks up the right location.  If
+    neither candidate exists the package-internal path is returned so
+    the eventual ``FileNotFoundError`` points at the install-correct
+    location.
     """
 
-    return Path(__file__).resolve().parent.parent.parent / "ui_static" / "picker.html"
+    here = Path(__file__).resolve()
+    pkg_dir = here.parent.parent              # <install_dir>/ghia
+    repo_root = pkg_dir.parent                # <install_dir or repo_root>
+    candidates = [
+        pkg_dir / "ui_static" / "picker.html",     # canonical, wheel-safe
+        repo_root / "ui_static" / "picker.html",   # legacy repo layout
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    return candidates[0]
 
 
 class ConfirmPayload(BaseModel):

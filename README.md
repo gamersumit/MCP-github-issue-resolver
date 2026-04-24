@@ -66,7 +66,7 @@ Happy path you'll see:
 1. Claude reports the active mode (`semi` or `full`) and the rendered protocol header.
 2. Claude reads any of `CLAUDE.md`, `CONTRIBUTING.md`, `AGENTS.md`, `.cursor/rules/*.md`, `.editorconfig`, top-level `README.md` that exist and prints a **conventions summary** (cached for the session).
 3. The browser picker opens at `http://127.0.0.1:4242/` showing every issue tagged with your configured label (`ai-fix` by default), priority-sorted. Headless / SSH session? You'll automatically get a `rich` terminal table instead — pick by typing the issue numbers.
-4. For each picked issue, Claude follows the workflow in `prompts/agent_protocol.md`:
+4. For each picked issue, Claude follows the workflow in `ghia/prompts/agent_protocol.md`:
    - `git create_branch` → `fix/issue-{n}-{slug}` (refuses if the slug ever resolves to the default branch)
    - `read_file` / `search_codebase` / `get_repo_structure` to investigate
    - `write_file` (atomic — temp + fsync + rename) to fix
@@ -124,7 +124,7 @@ You can be in exactly one mode at a time. Switch mid-session with `/issue-agent 
 | In-flight work on switch | Preserved — switch applies at next decision point | Same — the current issue finishes its current step before mode flips |
 | Best for | Sensitive repos, unfamiliar codebases | Routine `ai-fix`-labelled bugs you've already triaged |
 
-The mode is read at every decision point in `prompts/agent_protocol.md` (rendered fresh per call), so flipping modes does not require restarting the agent.
+The mode is read at every decision point in `ghia/prompts/agent_protocol.md` (rendered fresh per call), so flipping modes does not require restarting the agent.
 
 ---
 
@@ -277,8 +277,8 @@ github-issue-agent/
 │   └── integrations/
 │       ├── github.py            Full PyGithub wrapper (GitHubClient)
 │       └── docker_runner.py     Docker SDK wrapper for run_tests
-├── ui_static/picker.html        Self-contained picker UI (no CDN deps)
-├── prompts/agent_protocol.md    Injected into Claude on start
+│   ├── ui_static/picker.html    Self-contained picker UI (ships in wheel)
+│   └── prompts/agent_protocol.md  Injected into Claude on start (ships in wheel)
 ├── tests/                       pytest + pytest-asyncio (453 tests)
 └── docs/
     ├── PRD/PRD-2026-001-…       Product requirements (28 REQs, 85 ACs)

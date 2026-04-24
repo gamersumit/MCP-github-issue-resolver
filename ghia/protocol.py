@@ -47,9 +47,15 @@ class ProtocolTemplateError(Exception):
     """
 
 
-# The canonical place the template lives in the repo layout.  When the
-# package is installed as a wheel the template ships inside the wheel;
-# we resolve the path relative to this file so both layouts work.
+# The template ships inside the package at ``ghia/prompts/agent_protocol.md``.
+# Keeping the asset under the package tree (and declaring it as
+# package-data in ``pyproject.toml``) is what guarantees ``pip install .``
+# embeds the file in the wheel — earlier layouts kept it at
+# ``<repo_root>/prompts/...`` which silently dropped from wheel installs
+# and broke ``issue_agent_start`` with ``FileNotFoundError``.
+_PACKAGE_TEMPLATE_SUBPATH = Path("prompts") / "agent_protocol.md"
+# Legacy repo-root path retained as a fallback so an editable install
+# whose working tree predates the move still resolves the template.
 _REPO_TEMPLATE_SUBPATH = Path("prompts") / "agent_protocol.md"
 
 
@@ -70,23 +76,26 @@ def template_path() -> Path:
 
     Resolution order:
 
-    1. Repo-layout path: ``<repo_root>/prompts/agent_protocol.md`` where
-       ``repo_root`` is the parent of the ``ghia`` package directory.
-       This is what we use during development and for the current
-       non-wheel install.
-    2. Package-adjacent path: ``<this_dir>/prompts/agent_protocol.md``.
-       A future packaging change could ship the template inside the
-       package; we support it now so tests don't need to change later.
+    1. **Package-internal path** (``<pkg>/prompts/agent_protocol.md``).
+       This is the canonical location post-packaging-fix: the asset
+       lives inside the ``ghia`` package and ships with the wheel via
+       the ``[tool.setuptools.package-data]`` declaration.  Wheel
+       installs hit this branch.
+    2. **Legacy repo-root path** (``<repo_root>/prompts/...``).  Kept
+       so a developer who pulls a stale checkout — or an editable
+       install whose working tree still has the old layout — keeps
+       working without a re-install.
 
     The first existing candidate wins.  If neither exists the
-    repo-layout candidate is returned so callers get a clear
-    ``FileNotFoundError`` when they try to read it.
+    package-internal candidate is returned so callers get a clear
+    ``FileNotFoundError`` pointing at the install-correct location
+    rather than the legacy one.
     """
 
     pkg_dir = Path(__file__).resolve().parent
     candidates = [
-        pkg_dir.parent / _REPO_TEMPLATE_SUBPATH,   # <repo>/prompts/...
-        pkg_dir / _REPO_TEMPLATE_SUBPATH,          # <pkg>/prompts/... (future)
+        pkg_dir / _PACKAGE_TEMPLATE_SUBPATH,        # <pkg>/prompts/... (canonical)
+        pkg_dir.parent / _REPO_TEMPLATE_SUBPATH,    # <repo>/prompts/... (legacy)
     ]
     for c in candidates:
         if c.exists():

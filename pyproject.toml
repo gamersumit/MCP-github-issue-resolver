@@ -27,7 +27,6 @@ classifiers = [
 dependencies = [
     "fastmcp>=2.3,<3.0",
     "pygithub>=2.5,<3.0",
-    "gitpython>=3.1,<4.0",
     "docker>=7.1,<8.0",
     "httpx>=0.27,<0.29",
     "rich>=13.9,<14.0",
@@ -56,8 +55,20 @@ exclude = ["tests*", "docs*", "github-issue-agent*"]
 # Listing them as py-modules makes `pip install .` install them so the
 # `github-issue-agent = "server:main"` console script resolves and
 # `python -m setup_wizard` works for users who only have the wheel.
+#
+# include-package-data + the explicit package-data block below ship the
+# bundled prompt template (ghia/prompts/agent_protocol.md) and the
+# picker UI asset (ghia/ui_static/picker.html) inside the wheel. Without
+# this, `pip install .` produces a wheel that omits the .md/.html files
+# and `issue_agent_start` plus the picker UI both blow up with
+# FileNotFoundError on first use.
 [tool.setuptools]
 py-modules = ["server", "setup_wizard"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"ghia.prompts" = ["*.md"]
+"ghia.ui_static" = ["*.html"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"
