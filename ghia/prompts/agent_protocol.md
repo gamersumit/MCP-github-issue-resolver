@@ -67,6 +67,50 @@ For each issue in the queue:
 - Keep changes minimal and scoped. No unrelated refactoring.
 - Match the existing code style of the file you're editing.
 
+## Prefer auto-approved commands
+
+A PreToolUse permission policy auto-approves a wide set of safe commands and hard-denies a small set of dangerous ones. **Pick from the auto-approved set whenever possible** — every "ask" prompt costs the user a click and breaks flow. Before running a Bash command, check it against the categories below; if the obvious phrasing falls into "ask" or "deny", look for an equivalent in "allow" first.
+
+**Auto-approved (no prompt):**
+- **Read-only inspection:** `ls`, `pwd`, `cat`, `head`, `tail`, `wc`, `find`, `grep`/`rg`, `which`, `whoami`, `uname`, `jq`, `awk`, `sed -n`, `stat`, `file`, `realpath`, `tree`, `diff`
+- **Git non-destructive:** `git status`, `git diff`, `git log`, `git show`, `git branch`, `git checkout`, `git switch`, `git restore`, `git add`, `git commit`, `git push origin fix/...`, `git fetch`, `git pull`, `git rebase`, `git stash`, `git cherry-pick`
+- **gh:** `gh issue ...`, `gh pr ...`, `gh repo view`, `gh api`, `gh release`, `gh run`, `gh workflow`, `gh search`
+- **Toolchains:** every major package manager / runtime (`npm`/`yarn`/`pnpm`/`bun`/`node`, `pip`/`poetry`/`uv`/`python`, `cargo`/`rustc`, `go`, `mvn`/`gradle`/`./gradlew`/`./mvnw`, `make`, `dotnet`, `bundle`/`rails`, `composer`, `mix`, `dart`/`flutter`, `kotlin`, `swift`)
+- **Test / lint / format:** `pytest`, `jest`, `vitest`, `mocha`, `playwright`, `cypress`, `ruff`, `mypy`, `pyright`, `black`, `eslint`, `prettier`, `biome`, `tsc`, `golangci-lint`, `rubocop`, `phpstan`, `shellcheck`
+- **DB clients:** `psql`, `mysql`, `mongosh`, `redis-cli`, `sqlite3`, `clickhouse-client`, `duckdb`, `sqlcmd`
+- **Localhost network:** `curl http://localhost:...`, `curl http://127.0.0.1:...`, `curl http://*.local`
+- **GitHub network:** `curl https://github.com/...`, `curl https://raw.githubusercontent.com/...`
+- **Path-prefixed forms of all the above:** `./venv/bin/pytest`, `./node_modules/.bin/jest`, `/tmp/foo-venv/bin/pip`, `vendor/bin/phpunit`, `./gradlew`, `./mvnw`
+
+**Always denied (no prompt — don't try, find another way):**
+- `sudo`, `su`, `pkexec`, `doas` — never escalate. If a fix needs root, stop and surface to the user.
+- `rm -rf /`, `rm -rf ~`, `rm -rf $HOME`, `rm -rf *`, `rm -rf .` at repo root — destructive
+- `eval`, `bash -c "..."`, `sh -c "..."` — arbitrary shell. Save scripts to a file and invoke directly.
+- `wget`, `curl https://<non-GitHub-non-localhost>` — exfil guard. Use `gh api` for GitHub APIs; surface to user for any genuinely-needed third-party fetch.
+- `git push origin main`/`master`/`develop`, `git push --force`, `git push -f` — protected branches. You only ever push to `fix/...`.
+- `git reset --hard main` / `master` / `origin/main` — destructive on protected. Use `git revert` or branch off.
+- `git branch -D main`/`master` — never delete protected.
+- `dd of=/dev/...` — raw disk write
+- `ssh`, `scp`, `rsync ...::...` — outbound transport
+- Reads/copies of `~/.ssh/`, `~/.aws/`, `~/.config/gh/`, `.git-credentials` — credentials
+- Pipe-to-shell (`curl ... | bash`)
+
+**Substitutions to prefer:**
+| If you'd reach for... | Use instead |
+|---|---|
+| `wget <url>` | `curl <url>` (still must be GitHub or localhost) |
+| `curl <third-party API>` | `gh api ...` if it's a GitHub API; otherwise stop and ask the user |
+| `bash -c "complex shell"` | Write a `.sh` file via the Write tool, then invoke it directly |
+| `cat /etc/<file>` | If you really need system info, `getent`, `uname -a`, `hostnamectl` — but usually you don't need it for a code fix |
+| `git reset --hard` to undo | `git revert <sha>` (forward-only) or `git checkout <file>` (per-file) |
+| `git push --force` after rebase | Push to a NEW branch name (`fix/issue-N-v2`) and open a fresh PR |
+| `python -c "<arbitrary>"` | Save the snippet as a real `.py` file so the diff is reviewable |
+| `sed -i 's/.../.../'` to edit | Use the Edit tool — it shows a diff and respects the workspace |
+
+**When in doubt:** prefer the file-edit tools (`Edit`, `Write`, `Read`) over shell `cat >`/`sed -i`/`echo >>` — they're auto-approved AND produce clean diffs.
+
+**If a command lands in "ask":** try once. If denied, **don't keep retrying minor variations of the same blocked command** — find a different path through the auto-approved set. Three failed prompts in a row means stop and surface the situation to the user with a one-line explanation of what you were trying to accomplish.
+
 ## Naming
 - Branch: fix/issue-{number}-{short-slug-kebab-case-max-40}
 - Commit: "fix: {short description} (closes #{number})"

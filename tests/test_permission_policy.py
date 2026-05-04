@@ -400,6 +400,78 @@ def test_bash_versioned_interpreters_allowed(command: str) -> None:
 @pytest.mark.parametrize(
     "command",
     [
+        # Python web frameworks
+        "django-admin startproject mysite",
+        "django-admin migrate",
+        "fastapi dev main.py",
+        "fastapi run --workers 4",
+        "celery -A tasks worker --loglevel=info",
+        "celery beat",
+        "tornado test",
+        # Notebook tooling
+        "jupyter notebook",
+        "jupyter-lab --no-browser",
+        "ipython",
+        "papermill input.ipynb output.ipynb",
+        "nbconvert --to html notebook.ipynb",
+        # Data / ML
+        "dvc pull",
+        "dbt run --select my_model",
+        # Test helpers
+        "behave features/",
+        "coverage run -m pytest",
+        "coverage report",
+    ],
+)
+def test_bash_python_framework_ecosystem_allowed(command: str) -> None:
+    decision, reason = policy.decide("Bash", {"command": command})
+    assert decision == "allow", f"{command!r} should allow ({reason!r})"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # IaC / config mgmt
+        "terraform plan",
+        "terraform apply -auto-approve",
+        "tofu init",
+        "pulumi up",
+        "ansible-playbook deploy.yml",
+        "ansible-lint roles/",
+        # Cloud CLIs
+        "aws s3 ls",
+        "gcloud auth list",
+        "az login --use-device-code",
+        # Container / k8s extras
+        "crictl ps",
+        "nerdctl images",
+        "minikube start",
+        "k9s",
+        # Hooks / commit helpers
+        "pre-commit run --all-files",
+        "lefthook run pre-commit",
+        "commitizen commit",
+        "lint-staged",
+        # HTTP clients
+        "httpie GET https://api.github.com/repos/foo/bar",
+        "xh GET localhost:8080",
+        # Version managers
+        "asdf install python 3.12.0",
+        "mise use python@3.12",
+        "volta install node@22",
+        "nvm use 22",
+        # Local CI
+        "act -j build",
+    ],
+)
+def test_bash_devops_and_cli_tooling_allowed(command: str) -> None:
+    decision, reason = policy.decide("Bash", {"command": command})
+    assert decision == "allow", f"{command!r} should allow ({reason!r})"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         # React ecosystem
         "react-scripts test --watchAll=false",
         "react-scripts build",
@@ -498,6 +570,61 @@ def test_empty_bash_command_asks() -> None:
 
 def test_missing_command_field_asks() -> None:
     decision, _ = policy.decide("Bash", {})
+    assert decision == "ask"
+
+
+# ----------------------------------------------------------------------
+# GHIA_POLICY_ALLOW_EXTRA — user-extension escape hatch
+# ----------------------------------------------------------------------
+
+
+def test_extra_allow_via_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bespoke binaries the user added via env var must auto-allow."""
+
+    monkeypatch.setenv(
+        "GHIA_POLICY_ALLOW_EXTRA",
+        "my-deploy-cli,build-wrapper,scripts/run-tests.sh",
+    )
+    for cmd in [
+        "my-deploy-cli stage",
+        "build-wrapper --target prod",
+        "./scripts/run-tests.sh --only-changed",
+        "scripts/run-tests.sh",
+    ]:
+        decision, reason = policy.decide("Bash", {"command": cmd})
+        assert decision == "allow", f"{cmd!r} should allow ({reason!r})"
+
+
+def test_extra_allow_with_alternate_separators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The env var accepts comma, semicolon, or colon as separators."""
+
+    monkeypatch.setenv("GHIA_POLICY_ALLOW_EXTRA", "alpha;beta:gamma,delta")
+    for token in ["alpha", "beta", "gamma", "delta"]:
+        decision, _ = policy.decide("Bash", {"command": f"{token} --help"})
+        assert decision == "allow"
+
+
+def test_extra_allow_cannot_override_deny(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even with sudo in the allow-extra list, deny patterns still win."""
+
+    monkeypatch.setenv("GHIA_POLICY_ALLOW_EXTRA", "sudo,wget")
+    decision, reason = policy.decide(
+        "Bash", {"command": "sudo apt install foo"}
+    )
+    assert decision == "deny", f"deny must trump allow-extra ({reason!r})"
+
+
+def test_unset_env_var_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No env var means no extra allowlist — unknown bin still asks."""
+
+    monkeypatch.delenv("GHIA_POLICY_ALLOW_EXTRA", raising=False)
+    decision, _ = policy.decide("Bash", {"command": "totally-novel-binary"})
     assert decision == "ask"
 
 

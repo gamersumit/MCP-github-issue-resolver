@@ -47,6 +47,7 @@ nicer reason string.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
@@ -310,12 +311,25 @@ _ALLOW_TOOLCHAIN_FIRST_TOKEN: frozenset[str] = frozenset({
     "docusaurus", "vuepress", "vitepress",
     # Deploy CLIs (push to their own clouds; auth-bounded by user creds)
     "vercel", "netlify", "now", "amplify",
-    # Python
+    # Python — runtime, package mgmt, and the framework / task / test
+    # ecosystem the agent is overwhelmingly likely to encounter.
     "python", "python3", "pip", "pip3", "pipx", "poetry", "uv",
     "pdm", "conda", "mamba", "pyenv",
-    "pytest", "py.test", "tox", "nox",
+    "pytest", "py.test", "tox", "nox", "behave", "nose", "nose2",
+    "coverage", "coveragepy", "hypothesis",
     "ruff", "mypy", "pyright", "black", "flake8", "pylint",
-    "isort", "autoflake", "bandit",
+    "isort", "autoflake", "bandit", "pyflakes", "vulture",
+    # Django / FastAPI / Celery / Pyramid / async runtimes
+    "django-admin", "celery", "celerybeat", "kombu",
+    "fastapi",  # FastAPI CLI (newer versions ship one)
+    "pyramid", "tornado", "bottle",
+    "uvloop", "asgiref",
+    "alembic", "yoyo", "django-rq",
+    # Notebook tooling that the agent might exercise
+    "jupyter", "jupyter-lab", "jupyter-notebook", "ipython",
+    "papermill", "nbconvert", "nbqa", "nbstripout",
+    # Data/ML tooling commonly invoked from a fix workflow
+    "dvc", "dbt", "dbt-core",
     # Rust
     "cargo", "rustc", "rustup", "rustfmt", "rust-analyzer",
     # Go
@@ -360,9 +374,35 @@ _ALLOW_TOOLCHAIN_FIRST_TOKEN: frozenset[str] = frozenset({
     # Linters / formatters (cross-language)
     "eslint", "prettier", "biome", "rome", "stylelint", "shellcheck",
     "shfmt", "yamllint", "markdownlint", "actionlint",
-    # Container / k8s tooling — read-only or local-only
-    "docker", "podman", "kubectl", "helm", "kind", "k3d",
+    # Container / k8s / IaC / cloud tooling
+    "docker", "podman", "kubectl", "helm", "kind", "k3d", "k9s",
     "docker-compose",
+    "crictl", "nerdctl", "buildah", "skopeo",
+    "minikube", "k3s",
+    "terraform", "tofu", "pulumi", "cdktf", "cdk", "cdk8s",
+    "ansible", "ansible-playbook", "ansible-lint", "ansible-galaxy",
+    "saltstack", "salt-call", "chef", "knife", "puppet",
+    "vagrant",
+    # Cloud provider CLIs — auth-bounded by the user's existing creds
+    "aws", "gcloud", "az", "ibmcloud", "oci", "doctl",
+    "heroku", "render", "railway",
+    # Local CI / hooks / commit helpers
+    "act",  # nektos/act — run GH Actions locally
+    "pre-commit", "lefthook", "husky", "lint-staged",
+    "commitizen", "git-cz", "cz",
+    "semantic-release", "standard-version", "release-please",
+    "concurrently", "npm-run-all", "cross-env", "dotenv",
+    # HTTP CLIs (alternatives to curl — same security profile)
+    "httpie", "http", "xh", "curlie",
+    # Universal version / toolchain managers
+    "asdf", "mise", "rtx", "volta", "nvm",
+    "rbenv", "rvm", "chruby",
+    "tea", "pkgx",
+    # Archive / compression utilities
+    "7z", "7za", "bsdtar", "zstd", "lz4", "lzma", "lzop",
+    "snap", "snapcraft",  # snap pkg
+    # Build orchestrators not yet listed
+    "pants", "please", "earthly", "mill", "mage",
     # Documentation
     "mkdocs", "sphinx-build", "asciidoctor", "pandoc",
     # Database CLI clients — overwhelmingly used to read state /
@@ -496,6 +536,13 @@ def _segment_is_allowed(segment: str) -> tuple[bool, str]:
     if _BARE_VERSIONED_PATTERN.match(bare):
         return True, f"toolchain ({bare}, versioned form)"
 
+    # User-extended allowlist via env var. Last so the built-in
+    # categories take precedence (and so a user-supplied entry can't
+    # accidentally override a deny pattern — those run before any
+    # allow check).
+    if bare in _extra_allow_from_env():
+        return True, f"toolchain ({bare}, GHIA_POLICY_ALLOW_EXTRA)"
+
     # git / gh need a subcommand check.
     if bare == "git":
         sub = _git_subcommand(segment)
@@ -532,6 +579,43 @@ _BARE_VERSIONED_PATTERN = re.compile(
     r"rustc|gcc|clang|swift|gradle|mvn)"
     r"[-_v]?\d+(\.\d+)*$"
 )
+
+
+def _extra_allow_from_env() -> frozenset[str]:
+    """User-supplied extension to the toolchain allowlist.
+
+    Reads ``GHIA_POLICY_ALLOW_EXTRA`` (set in the user's shell env,
+    inherited by Claude Code which inherits it into the hook). The
+    value is a comma/semicolon/colon-separated list of bare command
+    names — first tokens that should auto-approve.
+
+    Why this exists: the built-in toolchain set is comprehensive but
+    every codebase has its own bespoke binaries (a custom build
+    wrapper, an org-specific deploy CLI, a small in-repo script). Users
+    shouldn't have to wait for an upstream release just to teach the
+    policy about ``my-deploy-cli``. Setting:
+
+        export GHIA_POLICY_ALLOW_EXTRA="my-deploy-cli,build-wrapper,scripts/run-tests.sh"
+
+    in ``~/.bashrc`` / ``~/.zshrc`` is enough — restart Claude Code
+    once and the new names auto-approve. The deny patterns still apply
+    (you can't ``GHIA_POLICY_ALLOW_EXTRA="sudo"`` your way past sudo).
+
+    Read fresh on every call so a user who edits their env between
+    starts of Claude Code doesn't have to remember to restart this
+    process — the policy script is a fresh process per hook invocation
+    anyway, but doing the read at call time keeps the logic close to
+    its use site.
+    """
+
+    raw = os.environ.get("GHIA_POLICY_ALLOW_EXTRA", "")
+    if not raw:
+        return frozenset()
+    return frozenset(
+        tok.strip().rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        for tok in re.split(r"[,;:]+", raw)
+        if tok.strip()
+    )
 
 
 def _git_subcommand(segment: str) -> str:

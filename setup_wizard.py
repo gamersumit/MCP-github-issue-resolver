@@ -585,7 +585,14 @@ def _prompt_permission_hook(console: Console, repo_root: Path) -> bool:
     )
     console.print(
         f"[green]Wrote permissions hook:[/green] {settings_path}\n"
-        "[dim]Restart Claude Code (full quit + relaunch) to pick it up.[/dim]"
+        "[dim]Restart Claude Code (full quit + relaunch) to pick it up.[/dim]\n\n"
+        "[bold]Extending the allowlist:[/bold] if your project uses bespoke\n"
+        "commands the policy doesn't know about (custom deploy CLIs, in-repo\n"
+        "scripts, organisation-specific binaries), add them via env var. Append\n"
+        "to your shell rc (~/.bashrc or ~/.zshrc) and restart Claude Code:\n\n"
+        "    [cyan]export GHIA_POLICY_ALLOW_EXTRA=\"my-deploy-cli,build-wrapper,scripts/run-tests.sh\"[/cyan]\n\n"
+        "Comma / semicolon / colon-separated list of bare command names. The\n"
+        "deny patterns still apply — you cannot allowlist sudo this way."
     )
     return True
 
