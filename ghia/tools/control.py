@@ -112,6 +112,12 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
     async with app.session.lock:
         current = await app.session.read()
         was_active = current.status == "active"
+        # A stop with active_issue preserved + a fresh start = resume.
+        # The agent should re-attach to the existing fix/ branch
+        # rather than create a new one.
+        resuming = (not was_active) and current.active_issue is not None
+        resume_active_issue = current.active_issue if resuming else None
+        resume_paused_at = current.paused_at if resuming else None
 
         # Run discovery *inside* the lock so a concurrent ``stop`` can't
         # clobber the conventions we're about to persist.  Discovery is
@@ -135,6 +141,9 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
             "session_started": session_started,
             "discovered_conventions": discovered,
             "default_branch": _DEFAULT_BRANCH_FALLBACK,
+            # Clear paused_at on activate — the field's whole purpose
+            # is "when we last paused", and we are no longer paused.
+            "paused_at": None,
         })
         app.session._persist(new_state)
 
@@ -152,6 +161,9 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
     new_state = await app.session.read()
 
     queue_summary = format_queue_summary(new_state.queue)
+    resume_context = _format_resume_context(
+        resume_active_issue, resume_paused_at, now
+    )
     protocol = render_protocol(
         repo=new_state.repo or app.repo_full_name,
         mode=new_state.mode,
@@ -159,6 +171,7 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
         discovered_conventions=discovered,
         queue_summary=queue_summary,
         timestamp=_human_timestamp(now),
+        resume_context=resume_context,
     )
 
     # Start the background poller only if one isn't already running.
@@ -175,11 +188,62 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
         "protocol": protocol,
         "mode": new_state.mode,
         "queue": list(new_state.queue),
+        "active_issue": new_state.active_issue,
         "label_filter": _label_filter_summary(app.config.labels),
         "discovered_conventions_preview": preview,
         "session_started": session_started.isoformat() if session_started else now.isoformat(),
         "refreshed": was_active,
+        "resumed_from_issue": resume_active_issue,
     })
+
+
+def _format_resume_context(
+    active_issue: int | None,
+    paused_at: datetime | None,
+    now: datetime,
+) -> str:
+    """Build the protocol's resume banner — empty string when not resuming.
+
+    Returned string is interpolated as ``{resume_context}`` in the
+    protocol template. When the agent isn't resuming, the empty
+    return collapses to a no-op in the rendered output.
+    """
+
+    if active_issue is None:
+        return ""
+
+    if paused_at is not None:
+        gap = now - paused_at
+        # Whole minutes is plenty granular; fractional seconds are noise.
+        minutes = int(gap.total_seconds() // 60)
+        if minutes < 1:
+            elapsed = "moments ago"
+        elif minutes == 1:
+            elapsed = "1 minute ago"
+        elif minutes < 60:
+            elapsed = f"{minutes} minutes ago"
+        else:
+            hours = minutes // 60
+            elapsed = f"{hours} hour{'s' if hours != 1 else ''} ago"
+    else:
+        elapsed = "earlier"
+
+    return (
+        f"\n## Resuming from a paused session\n\n"
+        f"**You stopped mid-issue on #{active_issue}** ({elapsed}). "
+        f"Local work is likely still on disk:\n"
+        f"- A `fix/issue-{active_issue}-...` branch should already exist; "
+        f"`git branch --list 'fix/issue-{active_issue}-*'` confirms.\n"
+        f"- Run `git status` and `git log -5 --oneline` on that branch to see "
+        f"what was already committed before the pause.\n"
+        f"- **Re-attach** with `git checkout <existing-branch>`. Do NOT "
+        f"`git checkout -b` — that would conflict with the existing branch "
+        f"and lose context.\n"
+        f"- Read the most recent commit message and any uncommitted diff to "
+        f"figure out where you stopped, then continue the workflow below "
+        f"from that step (skip the announce / get_issue calls if they were "
+        f"clearly already done — the user already knows what's happening).\n"
+    )
 
 
 def _label_filter_summary(labels: list[str]) -> str:
@@ -205,12 +269,27 @@ def _label_filter_summary(labels: list[str]) -> str:
 
 @wrap_tool
 async def issue_agent_stop(app: GhiaApp) -> ToolResponse:
-    """Pause the agent without destroying history.
+    """Pause the agent without destroying history OR in-flight work.
 
-    We keep ``completed`` and ``skipped`` intact so the response can
-    report "X issues completed this session" to the user.  Runtime
-    fields that only make sense while active (``active_issue``,
-    ``poll_timer_active``, ``queue``) are cleared.
+    Preserved across stop:
+    * ``mode``, ``completed``, ``skipped``, ``discovered_conventions``
+      — informative across pause/resume.
+    * ``queue`` — anything still pending stays pending.
+    * ``active_issue`` — if the agent was mid-issue when stop fired,
+      keeping the number lets the next ``start`` resurface it as a
+      resume context (instead of dropping the work and re-picking
+      from queue[0], which would conflict with the existing local
+      ``fix/issue-N`` branch).
+
+    Cleared on stop:
+    * ``status`` → ``idle``
+    * ``poll_timer_active`` → ``False`` (the task itself is cancelled
+      via :func:`polling.stop_polling`).
+
+    Stamped on stop:
+    * ``paused_at`` → now. The next start uses this to render a human
+      "Resumed after N minutes paused" banner so the user (and the
+      LLM) immediately know whether they're picking up cold or warm.
     """
 
     # Cancel the poller BEFORE flipping status — otherwise a tick
@@ -223,25 +302,33 @@ async def issue_agent_stop(app: GhiaApp) -> ToolResponse:
         current = await app.session.read()
         completed_count = len(current.completed)
         skipped_count = len(current.skipped)
+        had_active_issue = current.active_issue is not None
 
         new_state = SessionState.model_validate({
             **current.model_dump(),
             "status": "idle",
-            "active_issue": None,
             "poll_timer_active": False,
-            # Leave ``mode``, ``completed``, ``skipped``,
-            # ``discovered_conventions`` alone — they're informative
-            # across pause/resume and the UI shows them.
+            "paused_at": _iso_now(),
+            # active_issue intentionally NOT cleared — see docstring.
         })
         app.session._persist(new_state)
 
-    message = (
-        f"Agent paused. {completed_count} issues completed this session."
-    )
+    if had_active_issue:
+        message = (
+            f"Agent paused mid-issue (#{current.active_issue}). "
+            f"{completed_count} issues completed this session. "
+            "Re-run start to resume from where you left off."
+        )
+    else:
+        message = (
+            f"Agent paused. {completed_count} issues completed this session."
+        )
     return ok({
         "message": message,
         "completed_count": completed_count,
         "skipped_count": skipped_count,
+        "paused_mid_issue": had_active_issue,
+        "paused_active_issue": current.active_issue,
     })
 
 

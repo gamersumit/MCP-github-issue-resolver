@@ -166,6 +166,7 @@ _RENDER_VARS = frozenset({
     "default_branch",
     "discovered_conventions",
     "issue_list",
+    "resume_context",
 })
 
 
@@ -191,6 +192,7 @@ def render_protocol(
     discovered_conventions: str,
     queue_summary: str,
     timestamp: str,
+    resume_context: str = "",
 ) -> str:
     """Load and render the agent protocol template.
 
@@ -207,6 +209,9 @@ def render_protocol(
         queue_summary: Pre-rendered queue markdown (see
             :func:`format_queue_summary`).  May be empty.
         timestamp: Human-readable session-start timestamp.
+        resume_context: Pre-rendered "resuming from a paused session"
+            block — non-empty only when ``stop`` left an active_issue
+            for ``start`` to pick up. Empty string for cold starts.
 
     Returns:
         The fully rendered protocol string, ready to be handed to
@@ -247,6 +252,10 @@ def render_protocol(
             "label to issues you want handled, then wait for the next "
             "tick or call issue_agent_fetch_now to refresh immediately.)"
         ),
+        # resume_context is empty on cold start — the {resume_context}
+        # placeholder collapses to nothing, leaving the protocol
+        # exactly as it was for users who never paused mid-issue.
+        "resume_context": resume_context,
     }
     return _substitute_variables(expanded, values)
 

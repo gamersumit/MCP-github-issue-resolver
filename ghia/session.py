@@ -53,6 +53,10 @@ class SessionState(BaseModel):
     poll_timer_active: bool = False
     last_fetched: Optional[datetime] = None
     session_started: Optional[datetime] = None
+    # When the user (or a tool) last paused the agent. Preserved
+    # across stop so a subsequent start can detect "we have work in
+    # flight, resume mid-issue rather than starting fresh".
+    paused_at: Optional[datetime] = None
     default_branch: Optional[str] = None
     discovered_conventions: Optional[str] = None
 

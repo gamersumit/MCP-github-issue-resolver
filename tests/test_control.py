@@ -173,6 +173,67 @@ async def test_stop_from_idle_is_safe(app: GhiaApp) -> None:
     assert state.status == "idle"
 
 
+async def test_stop_preserves_active_issue_for_resume(app: GhiaApp) -> None:
+    """Mid-issue stop must NOT drop active_issue — it's how resume works.
+
+    v0.2.0 stop blanked active_issue, so a subsequent start re-picked
+    queue[0] and clashed with the pre-existing fix/issue-N branch on
+    disk. v0.2.2+ preserves it and stamps paused_at; the next start
+    surfaces a "Resuming from #N" banner in the rendered protocol.
+    """
+
+    await control.issue_agent_start(app)
+    # Simulate the queue processor having picked up issue 42.
+    await app.session.update(active_issue=42)
+
+    resp = await control.issue_agent_stop(app)
+    assert resp.success
+    assert resp.data["paused_mid_issue"] is True
+    assert resp.data["paused_active_issue"] == 42
+    assert "mid-issue" in resp.data["message"].lower()
+
+    state = await app.session.read()
+    assert state.status == "idle"
+    # The whole point: don't lose track of in-flight work.
+    assert state.active_issue == 42
+    assert state.paused_at is not None
+
+
+async def test_start_after_stop_with_active_issue_renders_resume_banner(
+    app: GhiaApp,
+) -> None:
+    """The full resume round-trip: start → stop mid-issue → start surfaces resume."""
+
+    await control.issue_agent_start(app)
+    await app.session.update(active_issue=7)
+    await control.issue_agent_stop(app)
+
+    resp = await control.issue_agent_start(app)
+    assert resp.success
+    assert resp.data["resumed_from_issue"] == 7
+    # The rendered protocol must include the resume banner so Claude
+    # sees it AND knows to re-attach to the existing branch instead of
+    # creating a new one.
+    protocol = resp.data["protocol"]
+    assert "Resuming from a paused session" in protocol
+    assert "#7" in protocol
+    assert "fix/issue-7-" in protocol  # branch hint
+    assert "Do NOT" in protocol and "checkout -b" in protocol  # explicit warning
+    # paused_at clears on activate.
+    state = await app.session.read()
+    assert state.paused_at is None
+    assert state.status == "active"
+
+
+async def test_cold_start_emits_no_resume_banner(app: GhiaApp) -> None:
+    """First-ever start (no in-flight issue) must NOT render a resume block."""
+
+    resp = await control.issue_agent_start(app)
+    assert resp.success
+    assert resp.data["resumed_from_issue"] is None
+    assert "Resuming from a paused session" not in resp.data["protocol"]
+
+
 async def test_start_creates_polling_task(app: GhiaApp) -> None:
     """issue_agent_start spawns the background poller."""
 

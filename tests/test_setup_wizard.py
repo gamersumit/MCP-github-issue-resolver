@@ -492,3 +492,157 @@ async def test_closing_panel_mentions_user_scope_and_slash_commands(
     # The misleading v0.1 instruction must NOT reappear in the panel.
     assert "claude mcp add github-issue-agent -- python -m server" not in output
     assert "/issue-agent start" not in output
+
+
+# ----------------------------------------------------------------------
+# Permissions hook helpers
+# ----------------------------------------------------------------------
+
+
+def test_merge_policy_hook_into_empty_settings() -> None:
+    settings: dict[str, Any] = {}
+    out = wiz._merge_policy_hook(settings, "/usr/bin/python -m ghia.policy.permission_policy")
+    pretool = out["hooks"]["PreToolUse"]
+    assert isinstance(pretool, list) and len(pretool) == 1
+    sub = pretool[0]["hooks"][0]
+    assert sub["type"] == "command"
+    assert "ghia.policy.permission_policy" in sub["command"]
+    assert sub["timeout"] == 10
+
+
+def test_merge_policy_hook_preserves_existing_unrelated_hooks() -> None:
+    """Existing user hooks (e.g. their own PreToolUse linter) must survive a wizard re-run."""
+
+    settings = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Edit",
+                    "hooks": [{"type": "command", "command": "my-personal-linter"}],
+                }
+            ],
+            "PostToolUse": [
+                {"hooks": [{"type": "command", "command": "my-postcommit"}]}
+            ],
+        },
+        "permissions": {"deny": ["Bash(rm -rf:*)"]},
+    }
+    out = wiz._merge_policy_hook(settings, "abs-path -m ghia.policy.permission_policy")
+    # User's existing entry preserved
+    assert out["hooks"]["PreToolUse"][0]["matcher"] == "Edit"
+    # Our entry appended
+    assert any(
+        "ghia.policy.permission_policy" in h.get("command", "")
+        for entry in out["hooks"]["PreToolUse"]
+        for h in entry.get("hooks", [])
+    )
+    # Unrelated keys untouched
+    assert out["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "my-postcommit"
+    assert out["permissions"]["deny"] == ["Bash(rm -rf:*)"]
+
+
+def test_merge_policy_hook_idempotent_on_rerun() -> None:
+    """Re-running install must update the path (e.g. clone moved) without duplicating."""
+
+    settings: dict[str, Any] = {}
+    wiz._merge_policy_hook(settings, "old/python -m ghia.policy.permission_policy")
+    wiz._merge_policy_hook(settings, "new/python -m ghia.policy.permission_policy")
+    pretool = settings["hooks"]["PreToolUse"]
+    assert len(pretool) == 1, "policy hook entry should be refreshed in-place, not duplicated"
+    assert pretool[0]["hooks"][0]["command"].startswith("new/python")
+
+
+def test_load_claude_settings_handles_corrupt_file(tmp_path: Path) -> None:
+    """A garbled settings.local.json must rotate aside, NOT silently overwrite."""
+
+    target = tmp_path / "settings.local.json"
+    target.write_text("{ this is not valid json", encoding="utf-8")
+    out = wiz._load_claude_settings(target)
+    assert out == {}
+    backups = list(tmp_path.glob("settings.local.json.bak-*"))
+    assert backups, "corrupt settings file should be rotated to .bak-<ts>"
+
+
+# ----------------------------------------------------------------------
+# Git identity helpers
+# ----------------------------------------------------------------------
+
+
+def test_prompt_git_identity_skips_when_already_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both keys already set → no prompt, no subprocess writes."""
+
+    from rich.console import Console
+
+    def _fake_local(repo_root: Path, key: str) -> Optional[str]:  # type: ignore[name-defined]
+        return {"user.name": "Existing User", "user.email": "user@example.com"}[key]
+
+    def _explode_set(*_a: Any, **_kw: Any) -> Any:
+        raise AssertionError("_set_git_local should not be called when both keys are set")
+
+    monkeypatch.setattr(wiz, "_git_local_config", _fake_local)
+    monkeypatch.setattr(wiz, "_set_git_local", _explode_set)
+
+    wiz._prompt_git_identity(Console(), tmp_path, "octocat")
+    out = capsys.readouterr().out
+    # Rich may wrap mid-sentence — assert on tokens that survive wrapping.
+    assert "already set" in out
+    assert "Existing User" in out
+    assert "user@example.com" in out
+
+
+def test_prompt_git_identity_prompts_and_writes_when_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Local keys missing → user typed name + email → both are written via --local."""
+
+    from rich.console import Console
+
+    monkeypatch.setattr(wiz, "_git_local_config", lambda *_a, **_kw: None)
+    monkeypatch.setattr(wiz, "_git_global_config", lambda key: None)
+    monkeypatch.setattr(wiz, "_gh_active_user_email", lambda *_a, **_kw: None)
+
+    written: List[tuple[str, str]] = []
+
+    def _spy_set(repo_root: Path, key: str, value: str) -> None:
+        written.append((key, value))
+
+    monkeypatch.setattr(wiz, "_set_git_local", _spy_set)
+
+    monkeypatch.setattr(
+        "rich.prompt.Prompt.ask",
+        _ScriptedPrompt(["Real Name", "real@example.com"]),
+    )
+
+    wiz._prompt_git_identity(Console(), tmp_path, "octocat")
+
+    assert written == [("user.name", "Real Name"), ("user.email", "real@example.com")]
+
+
+def test_prompt_git_identity_rejects_invalid_email_then_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Email validation re-prompts on a malformed entry, accepts the next try."""
+
+    from rich.console import Console
+
+    monkeypatch.setattr(wiz, "_git_local_config", lambda *_a, **_kw: None)
+    monkeypatch.setattr(wiz, "_git_global_config", lambda key: None)
+    monkeypatch.setattr(wiz, "_gh_active_user_email", lambda *_a, **_kw: None)
+
+    written: List[tuple[str, str]] = []
+    monkeypatch.setattr(
+        wiz,
+        "_set_git_local",
+        lambda r, k, v: written.append((k, v)),
+    )
+    monkeypatch.setattr(
+        "rich.prompt.Prompt.ask",
+        _ScriptedPrompt(["Real Name", "not-an-email", "real@example.com"]),
+    )
+
+    wiz._prompt_git_identity(Console(), tmp_path, None)
+
+    assert ("user.email", "real@example.com") in written
+    assert all(email != "not-an-email" for _key, email in written)

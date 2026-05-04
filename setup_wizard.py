@@ -31,10 +31,13 @@ confusion with the legacy setuptools entry point.  Invoke via
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
+import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -213,6 +216,378 @@ def _prompt_labels(console: Console, current: list[str]) -> list[str]:
         console.print(
             "[red]At least one label required (or pick option 1 / 2 above).[/red]"
         )
+
+
+def _git_local_config(repo_root: Path, key: str) -> Optional[str]:
+    """Return ``git config --local <key>`` for ``repo_root`` or None if unset.
+
+    A non-zero exit code from ``git config`` means "no value set" — we
+    swallow it. We deliberately don't fall back to ``--global`` here:
+    the wizard's whole point is per-repo isolation, so a global match
+    that the user might not realise applies should still be surfaced.
+    """
+
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--local", "--get", key],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    value = proc.stdout.strip()
+    return value or None
+
+
+def _git_global_config(key: str) -> Optional[str]:
+    """Return ``git config --global <key>`` or None if unset.
+
+    Used purely as a *suggestion* — we surface "found <X> in your
+    global config, want to keep that for this repo?" so the user
+    isn't typing their email from scratch every time.
+    """
+
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--global", "--get", key],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    value = proc.stdout.strip()
+    return value or None
+
+
+def _gh_active_user_email(active_account: Optional[str]) -> Optional[str]:
+    """Best-effort email lookup via the gh API for ``active_account``.
+
+    Returns the email registered on the user's GitHub profile, or None
+    if gh has no authenticated account or the user hides their email.
+    Used as a third-tier suggestion (after local + global git config).
+    Side-effects: one ``gh api user`` call, ~1s on a cold connection.
+    """
+
+    if not active_account:
+        return None
+    try:
+        proc = subprocess.run(
+            ["gh", "api", "user", "--jq", ".email"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=8,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    email = proc.stdout.strip()
+    # gh prints "null" when the profile email is private.
+    if not email or email == "null":
+        return None
+    return email
+
+
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def _prompt_git_identity(
+    console: Console,
+    repo_root: Path,
+    active_account: Optional[str],
+) -> None:
+    """Ensure ``git config --local user.{name,email}`` is set in ``repo_root``.
+
+    Wizard step ordering matters: this runs AFTER repo+gh auth pass
+    so we know we're in a git repo and which gh account is active.
+    Skipped (no prompt) when both keys already have a local value —
+    the user has already made a deliberate choice for this repo.
+
+    Suggestion ladder for unset keys:
+      1. Existing local value (silent skip if both already set).
+      2. Existing global value (offered as ENTER default).
+      3. The active gh account's profile email (only for user.email).
+      4. Free-text input.
+
+    The function ALWAYS writes via ``--local`` so the user's global
+    git config is left alone. Multi-account users who want different
+    identities per repo benefit; single-account users see one extra
+    ENTER on first wizard run and never again.
+    """
+
+    existing_name = _git_local_config(repo_root, "user.name")
+    existing_email = _git_local_config(repo_root, "user.email")
+
+    if existing_name and existing_email:
+        console.print(
+            "\n[dim]Git identity (local): "
+            f"{existing_name} <{existing_email}> — already set, skipping prompt.[/dim]"
+        )
+        return
+
+    console.print(
+        "\n[bold]Git identity (this repo only)[/bold]\n"
+        "  Sets [cyan]git config --local user.name / user.email[/cyan] so "
+        "commits the agent makes in this repo are authored by YOU,\n"
+        "  not whatever the global config (or its fallback) happens to be."
+    )
+
+    # Pre-compute suggestion ladder values so the prompts can show
+    # them as defaults.
+    global_name = _git_global_config("user.name")
+    global_email = _git_global_config("user.email")
+    profile_email = _gh_active_user_email(active_account) if not existing_email else None
+
+    # ----- name -----
+    if existing_name:
+        name = existing_name
+    else:
+        suggestion = global_name or active_account or ""
+        prompt_text = "Git user.name"
+        if suggestion:
+            prompt_text += f" (ENTER = {suggestion})"
+        for _ in range(_MAX_PROMPT_ATTEMPTS):
+            raw = Prompt.ask(
+                prompt_text,
+                default=suggestion or None,
+                console=console,
+                show_default=False,
+            )
+            candidate = (raw or "").strip()
+            if candidate:
+                name = candidate
+                break
+            console.print("[red]Name cannot be empty.[/red]")
+        else:
+            console.print(
+                "[yellow]Skipping git identity setup — too many empty attempts.[/yellow]"
+            )
+            return
+
+    # ----- email -----
+    if existing_email:
+        email = existing_email
+    else:
+        suggestion = global_email or profile_email or ""
+        prompt_text = "Git user.email"
+        if suggestion:
+            prompt_text += f" (ENTER = {suggestion})"
+        for _ in range(_MAX_PROMPT_ATTEMPTS):
+            raw = Prompt.ask(
+                prompt_text,
+                default=suggestion or None,
+                console=console,
+                show_default=False,
+            )
+            candidate = (raw or "").strip()
+            if not candidate:
+                console.print("[red]Email cannot be empty.[/red]")
+                continue
+            if not _EMAIL_RE.match(candidate):
+                console.print(
+                    f"[red]'{candidate}' doesn't look like an email "
+                    "(expected something@domain.tld).[/red]"
+                )
+                continue
+            email = candidate
+            break
+        else:
+            console.print(
+                "[yellow]Skipping git identity setup — too many invalid attempts.[/yellow]"
+            )
+            return
+
+    # Write both, even if only one was missing — saves the user from
+    # the inconsistent state where name is local + email is global
+    # (which is a perfectly valid git configuration but tends to
+    # confuse people who later wonder which one applies).
+    _set_git_local(repo_root, "user.name", name)
+    _set_git_local(repo_root, "user.email", email)
+    console.print(
+        f"[green]Git identity set:[/green] {name} <{email}> "
+        "(scope: --local, this repo only)"
+    )
+
+
+def _set_git_local(repo_root: Path, key: str, value: str) -> None:
+    """Run ``git config --local <key> <value>`` in ``repo_root``."""
+
+    try:
+        subprocess.run(
+            ["git", "config", "--local", key, value],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"git config --local {key} failed: {exc.stderr.strip() or exc}"
+        ) from exc
+
+
+# ----------------------------------------------------------------------
+# Permission hook: write .claude/settings.local.json so Claude Code
+# auto-approves the agent's typical commands without prompting per step.
+# ----------------------------------------------------------------------
+
+
+def _policy_hook_command() -> str:
+    """Return the absolute command Claude Code should invoke per tool call.
+
+    Uses ``sys.executable`` (the wizard's own Python — guaranteed to be
+    the agent's venv since the user runs the wizard via the venv-
+    backed console script) so the hook keeps working regardless of
+    the user's shell PATH at the time Claude Code spawns it.
+    """
+
+    return f"{sys.executable} -m ghia.policy.permission_policy"
+
+
+def _claude_settings_path(repo_root: Path) -> Path:
+    """Where the per-repo Claude Code settings live."""
+
+    return repo_root / ".claude" / "settings.local.json"
+
+
+def _load_claude_settings(path: Path) -> dict[str, Any]:
+    """Load existing Claude Code settings, or return an empty dict.
+
+    A malformed file is preserved as ``<path>.bak-<ts>`` and a fresh
+    settings dict is returned — same "rotate corrupt aside" policy as
+    SessionStore. We never blow away a user's settings without keeping
+    a backup they can recover from.
+    """
+
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    # Bad file — rotate aside.
+    from datetime import datetime, timezone
+
+    ts = (
+        datetime.now(tz=timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace(":", "-")
+    )
+    backup = path.with_name(f"{path.name}.bak-{ts}")
+    try:
+        path.rename(backup)
+    except OSError:
+        pass
+    return {}
+
+
+def _merge_policy_hook(settings: dict[str, Any], hook_command: str) -> dict[str, Any]:
+    """Insert/refresh the policy hook entry in ``settings`` without clobbering.
+
+    We only touch ``settings["hooks"]["PreToolUse"]``. If the user has
+    other PreToolUse hooks, we leave them in place and either add ours
+    (when not present) or update its ``command`` (when present). The
+    hook is identified by the ``ghia.policy.permission_policy``
+    substring in its command — that's both stable across reinstalls
+    and unique enough that no realistic user-installed hook would
+    collide with it.
+    """
+
+    hooks_block = settings.setdefault("hooks", {})
+    if not isinstance(hooks_block, dict):
+        hooks_block = {}
+        settings["hooks"] = hooks_block
+
+    pretooluse = hooks_block.setdefault("PreToolUse", [])
+    if not isinstance(pretooluse, list):
+        pretooluse = []
+        hooks_block["PreToolUse"] = pretooluse
+
+    target_entry = {
+        "hooks": [
+            {
+                "type": "command",
+                "command": hook_command,
+                "timeout": 10,
+            }
+        ]
+    }
+
+    # Look for an existing ghia entry; refresh its command if found.
+    for entry in pretooluse:
+        if not isinstance(entry, dict):
+            continue
+        for sub_hook in entry.get("hooks", []) or []:
+            if (
+                isinstance(sub_hook, dict)
+                and "ghia.policy.permission_policy" in str(sub_hook.get("command", ""))
+            ):
+                sub_hook["command"] = hook_command
+                sub_hook.setdefault("type", "command")
+                sub_hook.setdefault("timeout", 10)
+                return settings
+
+    pretooluse.append(target_entry)
+    return settings
+
+
+def _prompt_permission_hook(console: Console, repo_root: Path) -> bool:
+    """Offer to wire the auto-approve hook into the target repo.
+
+    Returns True iff the hook was actually written. Default is yes —
+    the explicit opt-out makes it easy for users who'd rather see
+    every prompt to keep that workflow.
+    """
+
+    console.print(
+        "\n[bold]Permissions hook (recommended)[/bold]\n"
+        "  Without this, Claude Code prompts you to approve every git/gh/test/lint\n"
+        "  command the agent runs — turning 'full mode' into 'click yes a lot'.\n\n"
+        "  Wizard can write [cyan].claude/settings.local.json[/cyan] in this repo with a\n"
+        "  policy that auto-approves safe commands (read-only inspection, git ops on\n"
+        "  fix/ branches, gh API calls, common test/lint runners) and hard-denies\n"
+        "  dangerous ones (sudo, rm -rf /, push to main, curl to non-GitHub, eval, …).\n"
+        "  Anything novel still surfaces a prompt — security boundary preserved.\n\n"
+        "  The file is per-repo, per-user (Claude Code's .local.json convention)\n"
+        "  and will be auto-gitignored if your repo follows the standard template."
+    )
+
+    decision = Prompt.ask(
+        "Wire the auto-approve hook? (y/n) (ENTER = y)",
+        default="y",
+        choices=["y", "n", "yes", "no"],
+        console=console,
+        show_choices=False,
+        show_default=False,
+    )
+    if decision.lower().startswith("n"):
+        console.print("[dim]Skipped — every command will continue to prompt.[/dim]")
+        return False
+
+    settings_path = _claude_settings_path(repo_root)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings = _load_claude_settings(settings_path)
+    settings = _merge_policy_hook(settings, _policy_hook_command())
+    settings_path.write_text(
+        json.dumps(settings, indent=2, sort_keys=False) + "\n",
+        encoding="utf-8",
+    )
+    console.print(
+        f"[green]Wrote permissions hook:[/green] {settings_path}\n"
+        "[dim]Restart Claude Code (full quit + relaunch) to pick it up.[/dim]"
+    )
+    return True
 
 
 def _prompt_mode(console: Console, current: Optional[str]) -> str:
@@ -494,6 +869,31 @@ async def async_main() -> int:
         lint_command=lint_cmd,
     )
     save_config(cfg, path=config_path)
+
+    # Post-config follow-ups, all best-effort: a single failure here
+    # MUST NOT bring down the wizard — the per-repo config is already
+    # written, the user can re-run the wizard or fix things by hand.
+    repo_root = Path.cwd()
+    try:
+        _prompt_git_identity(console, repo_root, active_account)
+    except (KeyboardInterrupt, EOFError):
+        console.print(
+            "\n[yellow]Skipped git identity setup — config written, "
+            "you can finish git config manually with `git config --local`.[/yellow]"
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort follow-up
+        console.print(f"[yellow]Git identity step failed: {exc}[/yellow]")
+
+    try:
+        _prompt_permission_hook(console, repo_root)
+    except (KeyboardInterrupt, EOFError):
+        console.print(
+            "\n[yellow]Skipped permissions hook — config written, "
+            "re-run the wizard if you want to add it later.[/yellow]"
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort follow-up
+        console.print(f"[yellow]Permissions hook step failed: {exc}[/yellow]")
+
     _success_panel(console, config_path, cfg, repo_full, active_account or "unknown")
     return 0
 
