@@ -153,14 +153,66 @@ def _prompt_with_default(
     return (value or "").strip()
 
 
-def _prompt_label(console: Console, current: Optional[str]) -> str:
-    """Prompt for the issue label with a default."""
+def _prompt_labels(console: Console, current: list[str]) -> list[str]:
+    """Prompt for the label-filter strategy.
 
-    default = current if current else "ai-fix"
-    value = _prompt_with_default(
-        console, "\n[bold]Issue label[/bold]", default=default
+    Returns the resulting list of labels:
+    * ``[]`` — no filter, every open issue is a candidate
+    * ``["X"]`` — only issues labelled ``X``
+    * ``["X", "Y"]`` — issues labelled ``X`` OR ``Y`` (union)
+
+    The picker presents three menu options. Option 3 (custom) accepts
+    a comma-separated string and tokenizes it client-side; we don't
+    forward the raw string to GitHub because gh's ``--label`` flag is
+    AND-only — we run one fetch per label and union the results.
+    """
+
+    console.print(
+        "\n[bold]Which issues should the agent watch?[/bold]\n"
+        "  1. Only issues labelled 'ai-fix' (recommended — explicit opt-in)\n"
+        "  2. ALL open issues (no label filter — agent will try to fix every open issue)\n"
+        "  3. Custom label or comma-separated set (OR semantics)"
     )
-    return value or default
+
+    if current == ["ai-fix"]:
+        default_choice = "1"
+    elif not current:
+        default_choice = "2"
+    elif current:
+        default_choice = "3"
+    else:
+        default_choice = "1"
+
+    choice = Prompt.ask(
+        f"Select 1 / 2 / 3 (ENTER = {default_choice})",
+        default=default_choice,
+        choices=["1", "2", "3"],
+        console=console,
+        show_choices=False,
+        show_default=False,
+    )
+
+    if choice == "1":
+        return ["ai-fix"]
+    if choice == "2":
+        return []
+    # choice == "3" — collect a labels string
+    default_text = ", ".join(current) if current else ""
+    while True:
+        raw = Prompt.ask(
+            "Labels (comma-separated, e.g. 'bug, enhancement')"
+            + (f" (ENTER = {default_text})" if default_text else ""),
+            default=default_text or None,
+            console=console,
+            show_default=False,
+        )
+        labels = [tok.strip() for tok in (raw or "").split(",")]
+        labels = [tok for tok in labels if tok]
+        if labels:
+            return labels
+        console.print(
+            "[red]At least one label required (or pick option 1 / 2 above).[/red]"
+        )
 
 
 def _prompt_mode(console: Console, current: Optional[str]) -> str:
@@ -241,6 +293,16 @@ def _prompt_command(
     )
 
 
+def _format_labels_for_summary(labels: list[str]) -> str:
+    """Render the configured labels for the success-panel summary line."""
+
+    if not labels:
+        return "(none — all open issues)"
+    if len(labels) == 1:
+        return labels[0]
+    return ", ".join(labels) + "  (issues with ANY of these are picked up)"
+
+
 def _success_panel(console: Console, path: Path, cfg: Config, repo: str, account: str) -> None:
     """Print the final instructions panel.
 
@@ -257,7 +319,7 @@ def _success_panel(console: Console, path: Path, cfg: Config, repo: str, account
 
     body.append("Per-repo config (THIS repo only):\n", style="bold")
     body.append(f"  {path}\n")
-    body.append("  Stores: label, mode, poll_interval, test/lint commands.\n\n")
+    body.append("  Stores: labels, mode, poll_interval, test/lint commands.\n\n")
 
     body.append(
         "MCP server registration (GLOBAL — already done by install.sh):\n",
@@ -274,7 +336,7 @@ def _success_panel(console: Console, path: Path, cfg: Config, repo: str, account
     )
 
     body.append("Summary:\n", style="bold")
-    body.append(f"  label:             {cfg.label}\n")
+    body.append(f"  labels:            {_format_labels_for_summary(cfg.labels)}\n")
     body.append(f"  mode:              {cfg.mode}\n")
     body.append(f"  poll_interval:     {cfg.poll_interval_min} min\n")
     body.append(f"  test_command:      {cfg.test_command or '(none)'}\n")
@@ -397,7 +459,9 @@ async def async_main() -> int:
         )
 
     try:
-        label = _prompt_label(console, existing.label if existing else None)
+        labels = _prompt_labels(
+            console, list(existing.labels) if existing else ["ai-fix"]
+        )
         mode = _prompt_mode(console, existing.mode if existing else None)
         poll = _prompt_poll_interval(
             console, existing.poll_interval_min if existing else None
@@ -423,7 +487,7 @@ async def async_main() -> int:
         return 1
 
     cfg = Config(
-        label=label,
+        labels=labels,
         mode=mode,  # type: ignore[arg-type]  # Literal narrowing
         poll_interval_min=poll,
         test_command=test_cmd,

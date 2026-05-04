@@ -46,20 +46,43 @@ PollTickHandler = Callable[[GhiaApp], Awaitable[None]]
 async def _tick_once(app: GhiaApp) -> None:
     """Run one fetch-and-record iteration.
 
-    Imports :mod:`ghia.tools.issues` lazily to avoid a circular import
-    (issues → app, polling → app, control → polling): keeping the
-    module-level import set narrow makes the module graph easier to
-    reason about.
+    Side effects:
+    * Calls :func:`ghia.tools.issues.list_issues` against the
+      configured label set (OR semantics for multi-label).
+    * Appends every newly-seen issue number to ``state.queue``,
+      excluding numbers already in ``state.queue``, ``state.completed``,
+      or ``state.skipped`` so user decisions are honored across polls.
+    * Updates ``state.last_fetched`` AFTER the fetch returns so a
+      failed fetch doesn't lie about freshness.
 
-    The ``last_fetched`` timestamp is the source of truth for "when did
-    we last sync with GitHub?" — UIs and the status tool surface it to
-    the user.  We update it AFTER the fetch returns so a failed fetch
-    doesn't lie about when we last had fresh data.
+    Imports :mod:`ghia.tools.issues` lazily to avoid a circular import
+    (issues → app, polling → app, control → polling).
     """
 
     from ghia.tools import issues as issues_tools
 
-    await issues_tools.list_issues(app)
+    response = await issues_tools.list_issues(app)
+
+    if response.success and isinstance(response.data, dict):
+        fetched_numbers: list[int] = []
+        for issue in response.data.get("issues") or []:
+            number = issue.get("number")
+            if isinstance(number, int):
+                fetched_numbers.append(number)
+
+        if fetched_numbers:
+            async with app.session.lock:
+                current = await app.session.read()
+                blocked = set(current.queue) | set(current.completed) | set(current.skipped)
+                new_queue = list(current.queue)
+                for n in fetched_numbers:
+                    if n not in blocked:
+                        new_queue.append(n)
+                        blocked.add(n)
+                if new_queue != list(current.queue):
+                    new_state = current.model_copy(update={"queue": new_queue})
+                    app.session._persist(new_state)
+
     await app.session.update(last_fetched=datetime.now(tz=timezone.utc))
 
 

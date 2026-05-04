@@ -241,7 +241,12 @@ def render_protocol(
         "mode": mode,
         "default_branch": default_branch,
         "discovered_conventions": discovered_conventions or "(none detected)",
-        "issue_list": queue_summary or "(queue empty — run pick_issues to populate)",
+        "issue_list": queue_summary or (
+            "(queue empty — the agent auto-populates from open issues "
+            "matching the configured label(s) on every poll. Add the "
+            "label to issues you want handled, then wait for the next "
+            "tick or call issue_agent_fetch_now to refresh immediately.)"
+        ),
     }
     return _substitute_variables(expanded, values)
 
@@ -249,11 +254,11 @@ def render_protocol(
 def format_queue_summary(queue: Iterable[int]) -> str:
     """Render a short bullet list for the active queue.
 
-    Titles are not yet available at this stage of the pipeline (they
-    come from ``get_issue`` which lands in Cluster 4), so every bullet
-    ends with ``(title unknown until fetched)``.  An empty queue
-    returns the empty string so ``render_protocol`` can swap in its
-    own placeholder copy.
+    The renderer only has issue numbers at this stage — titles are
+    fetched lazily by ``get_issue`` when the agent picks each one up,
+    so every bullet ends with ``(title unknown until fetched)``.  An
+    empty queue returns the empty string so ``render_protocol`` can
+    swap in its own placeholder copy.
     """
 
     numbers = list(queue)

@@ -123,12 +123,12 @@ async def test_fresh_wizard_run_writes_expected_config(
 ) -> None:
     # Scripted answers in the order the wizard asks (no token, no repo
     # — those are auto-detected now):
-    # 1. label
+    # 1. labels menu choice ("1" = default ai-fix)
     # 2. mode
     # 3. test command (empty → skip)
     # 4. lint command (empty → skip)
     prompt = _ScriptedPrompt([
-        "ai-fix",   # label
+        "1",        # labels menu — option 1 (default ai-fix)
         "semi",     # mode
         "",         # test_command (skip)
         "",         # lint_command (skip)
@@ -145,7 +145,7 @@ async def test_fresh_wizard_run_writes_expected_config(
         assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
 
     cfg = load_config(path=isolated_config)
-    assert cfg.label == "ai-fix"
+    assert cfg.labels == ["ai-fix"]
     assert cfg.mode == "semi"
     assert cfg.poll_interval_min == 30
     assert cfg.test_command is None
@@ -435,10 +435,10 @@ async def test_wizard_does_not_call_claude_mcp_add(
     monkeypatch.setattr(_subprocess, "run", _spy_run)
 
     prompt = _ScriptedPrompt([
-        "ai-fix",
-        "semi",
-        "",
-        "",
+        "1",        # labels menu — option 1 (default ai-fix)
+        "semi",     # mode
+        "",         # test_command (skip)
+        "",         # lint_command (skip)
     ])
     monkeypatch.setattr("rich.prompt.Prompt.ask", prompt)
     monkeypatch.setattr("rich.prompt.IntPrompt.ask", _ScriptedPrompt([30]))
@@ -471,10 +471,10 @@ async def test_closing_panel_mentions_user_scope_and_slash_commands(
     """
 
     prompt = _ScriptedPrompt([
-        "ai-fix",
-        "semi",
-        "",
-        "",
+        "1",        # labels menu — option 1 (default ai-fix)
+        "semi",     # mode
+        "",         # test_command (skip)
+        "",         # lint_command (skip)
     ])
     monkeypatch.setattr("rich.prompt.Prompt.ask", prompt)
     monkeypatch.setattr("rich.prompt.IntPrompt.ask", _ScriptedPrompt([30]))

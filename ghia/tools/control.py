@@ -7,7 +7,7 @@ Five user-visible MCP tools that govern the agent's lifecycle:
 * ``issue_agent_stop``  — pause the agent [REQ-007]
 * ``issue_agent_status``— read-only snapshot of the session [REQ-008]
 * ``issue_agent_set_mode`` — swap semi/full mid-session [REQ-009]
-* ``issue_agent_fetch_now`` — STUB until Cluster 4 lands [REQ-005]
+* ``issue_agent_fetch_now`` — trigger one polling tick out-of-band [REQ-005]
 
 Each function is wrapped with :func:`ghia.errors.wrap_tool` so any
 stray exception becomes a structured ``ToolResponse(err=...)`` instead
@@ -43,11 +43,11 @@ __all__ = [
 ]
 
 
-# TRD-023 will replace this with a real ``get_default_branch`` call that
-# hits the GitHub API and caches the result on the session.  Until then
-# the protocol banner shows "main" and a comment flags the stub so
-# reviewers remember to swap it out.
-_DEFAULT_BRANCH_STUB = "main"
+# Fallback shown in the protocol banner when we can't detect the repo's
+# default branch (e.g. the very first start, before any tool has hit
+# the GitHub API). Per-issue branch creation always re-resolves the
+# default at runtime via gh, so this fallback is purely cosmetic.
+_DEFAULT_BRANCH_FALLBACK = "main"
 
 _VALID_MODES: frozenset[str] = frozenset({"semi", "full"})
 
@@ -89,16 +89,18 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
          active (double-start is a user error, not a silent retry).
       2. Run convention discovery (async, thread-off-loaded).
       3. Persist: ``status="active"``, ``session_started=<now>``,
-         ``discovered_conventions=<summary>``, ``default_branch=<stub>``,
-         ``repo=<config.repo>``.
-      4. Render the protocol string with the current mode, queue, and
-         discovered conventions.
-      5. Return ``{protocol, mode, queue, discovered_conventions_preview}``.
-
-    Queue population is NOT performed here — :func:`pick_issues` in
-    Cluster 4 will fill it.  This function only echoes whatever is
-    already persisted so a user can call ``start`` after ``pick_issues``
-    in either order.
+         ``mode=app.config.mode`` (the wizard's choice, NOT the stale
+         session value), ``discovered_conventions=<summary>``,
+         ``default_branch=<fallback>``, ``repo=<auto-detected>``.
+      4. Trigger one immediate polling tick so the queue is populated
+         on first start (instead of making the user wait for the first
+         scheduled poll, which can be up to ``poll_interval_min``
+         minutes away).
+      5. Start the background polling task.
+      6. Render the protocol string with the freshly-populated queue
+         and a human-friendly summary of the label filter.
+      7. Return ``{protocol, mode, queue, label_summary,
+         discovered_conventions_preview}``.
     """
 
     async with app.session.lock:
@@ -115,36 +117,50 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
         discovered = await discover_conventions(app.repo_root)
 
         now = _iso_now()
-        # TRD-023: replace _DEFAULT_BRANCH_STUB with detected branch.
-        # v0.2: repo comes from app.repo_full_name (auto-detected),
-        # not app.config.repo (which no longer exists).
+        # The wizard's ``mode`` choice (``app.config.mode``) is the
+        # source of truth on every fresh start. ``set_mode`` is the
+        # only mid-session override; preserving session.mode here was
+        # a v0.2.0 bug that made "full" configs silently start in
+        # "semi" mode.
         new_state = SessionState.model_validate({
             **current.model_dump(),
             "status": "active",
-            "mode": current.mode,  # preserve any prior set_mode
+            "mode": app.config.mode,
             "repo": app.repo_full_name,
             "session_started": now,
             "discovered_conventions": discovered,
-            "default_branch": _DEFAULT_BRANCH_STUB,
+            "default_branch": _DEFAULT_BRANCH_FALLBACK,
         })
         app.session._persist(new_state)
 
-    # Render OUTSIDE the lock — it's a pure CPU op and we're done
-    # mutating state.
+    # First-start fetch — runs OUTSIDE the lock so the tick can
+    # acquire the lock for its own queue mutations. Errors are
+    # swallowed (logged) so a transient gh failure doesn't block
+    # ``start`` itself; the background poller will retry.
+    try:
+        await polling._tick_once(app)
+    except Exception as exc:  # noqa: BLE001 — never block start on fetch
+        logger.warning("initial fetch on start failed: %s", exc)
+
+    # Re-read so the rendered protocol shows the queue we just
+    # populated rather than the empty pre-fetch snapshot.
+    new_state = await app.session.read()
+
     queue_summary = format_queue_summary(new_state.queue)
     protocol = render_protocol(
         repo=new_state.repo or app.repo_full_name,
         mode=new_state.mode,
-        default_branch=new_state.default_branch or _DEFAULT_BRANCH_STUB,
+        default_branch=new_state.default_branch or _DEFAULT_BRANCH_FALLBACK,
         discovered_conventions=discovered,
         queue_summary=queue_summary,
         timestamp=_human_timestamp(now),
     )
 
-    # Start the background poller AFTER all state is persisted.  The
-    # polling task is the lone "ambient" piece of the agent — every
-    # other tool is request/response — so its lifecycle has to be
-    # bound tightly to start/stop or it will leak across sessions.
+    # Start the background poller AFTER all state is persisted and the
+    # initial fetch has run. The poller is the lone "ambient" piece of
+    # the agent — every other tool is request/response — so its
+    # lifecycle has to be bound tightly to start/stop or it will leak
+    # across sessions.
     await polling.start_polling(app)
 
     preview = (discovered or "")[:200]
@@ -152,9 +168,26 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
         "protocol": protocol,
         "mode": new_state.mode,
         "queue": list(new_state.queue),
+        "label_filter": _label_filter_summary(app.config.labels),
         "discovered_conventions_preview": preview,
         "session_started": now.isoformat(),
     })
+
+
+def _label_filter_summary(labels: list[str]) -> str:
+    """One-line human summary of the configured label filter.
+
+    Used in the start tool's response so the user immediately sees
+    which issues will be picked up — the #1 source of "why didn't it
+    fetch my issue?" confusion.
+    """
+
+    if not labels:
+        return "no filter — every open issue will be picked up"
+    if len(labels) == 1:
+        return f"only issues labelled '{labels[0]}'"
+    quoted = ", ".join(f"'{label}'" for label in labels)
+    return f"issues labelled any of: {quoted}"
 
 
 # ----------------------------------------------------------------------
@@ -237,12 +270,16 @@ async def issue_agent_status(app: GhiaApp) -> ToolResponse:
 
 @wrap_tool
 async def issue_agent_set_mode(app: GhiaApp, mode: str) -> ToolResponse:
-    """Validate ``mode`` and persist it.
+    """Validate ``mode`` and persist it to both session and config.
 
     AC-007-3/4/5 require the new mode to take effect immediately — we
-    satisfy that by persisting to ``session.json`` inside the lock, so
-    the very next ``issue_agent_status`` call (and every subsequent
-    control-flow decision in the agent) will see the new value.
+    persist to ``session.json`` so the very next status call (and
+    every subsequent control-flow decision) sees the new value.
+
+    We ALSO persist to the per-repo config file so the choice survives
+    ``stop`` → ``start``: the start tool reads ``app.config.mode``
+    as its source of truth, so without this dual-write a set_mode
+    call would silently revert on the next start.
     """
 
     if mode not in _VALID_MODES:
@@ -258,6 +295,25 @@ async def issue_agent_set_mode(app: GhiaApp, mode: str) -> ToolResponse:
             "mode": mode,
         })
         app.session._persist(new_state)
+
+    # Mirror to the on-disk config so the next start picks the same
+    # mode. ``app.config`` is the live model — we mutate it AFTER the
+    # save_config call so a write failure leaves the in-memory copy
+    # unchanged. ``app.config_path`` is None for some tests that build
+    # the dataclass directly; in that case skip persistence and just
+    # mutate the in-memory copy so the test's view of mode stays
+    # consistent.
+    new_cfg = app.config.model_copy(update={"mode": mode})
+    if app.config_path is not None:
+        try:
+            from ghia.config import save_config
+
+            save_config(new_cfg, path=app.config_path)
+        except Exception as exc:  # noqa: BLE001 — best-effort persistence
+            logger.warning(
+                "set_mode persisted session but failed to update config: %s", exc
+            )
+    app.config = new_cfg
 
     return ok({
         "mode": mode,

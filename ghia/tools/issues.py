@@ -124,29 +124,68 @@ async def list_issues(
 ) -> ToolResponse:
     """Return open issues, optionally filtered by label.
 
-    When ``label`` is ``None`` we default to ``app.config.label`` so
-    the common case ("show me my queue") doesn't require the caller to
-    re-pass the configured label every time.  Pass an empty string to
-    get *all* open issues regardless of label.
+    Filter resolution:
+    * ``label is None`` (the polling-tick default) — use the configured
+      ``app.config.labels``. Empty list means "no filter" (every open
+      issue); a single label is one ``gh issue list`` call; multiple
+      labels run in parallel and their results are unioned by issue
+      number (OR semantics).
+    * ``label == ""`` — caller explicitly wants every open issue
+      regardless of config.
+    * ``label is a non-empty str`` — single-label override for ad-hoc
+      queries.
     """
 
-    effective_label: Optional[str]
-    if label is None:
-        effective_label = app.config.label
-    elif label == "":
-        effective_label = None
+    if label == "":
+        results = [
+            await _safe_list(app.repo_full_name, label=None)
+        ]
+    elif isinstance(label, str):
+        results = [
+            await _safe_list(app.repo_full_name, label=label)
+        ]
     else:
-        effective_label = label
+        configured = list(app.config.labels)
+        if not configured:
+            results = [await _safe_list(app.repo_full_name, label=None)]
+        elif len(configured) == 1:
+            results = [await _safe_list(app.repo_full_name, label=configured[0])]
+        else:
+            # Parallel fan-out — gh's --label is AND-only across multiple
+            # flags, so we run one call per label and union by number.
+            results = await asyncio.gather(
+                *(_safe_list(app.repo_full_name, label=lab) for lab in configured)
+            )
+
+    for entry in results:
+        if isinstance(entry, ToolResponse):
+            return entry
+
+    seen: dict[int, dict[str, Any]] = {}
+    for issues in results:
+        for raw in issues:
+            number = raw.get("number")
+            if isinstance(number, int) and number not in seen:
+                seen[number] = _annotate(raw)
+    enriched = list(seen.values())
+    return ok({"issues": enriched, "count": len(enriched)})
+
+
+async def _safe_list(
+    repo: str, *, label: Optional[str]
+) -> Any:
+    """Call ``gh_cli.list_issues`` and convert auth errors to ToolResponse.
+
+    Returns either the raw issue list (success) or a ``ToolResponse``
+    carrying the structured error so the caller can short-circuit.
+    Pulled out of :func:`list_issues` so the parallel fan-out path can
+    reuse the same conversion without duplicating try/except.
+    """
 
     try:
-        raw_issues = await gh_cli.list_issues(
-            app.repo_full_name, label=effective_label
-        )
+        return await gh_cli.list_issues(repo, label=label)
     except GhAuthError as exc:
         return err(exc.code, exc.message)
-
-    enriched = [_annotate(i) for i in raw_issues]
-    return ok({"issues": enriched, "count": len(enriched)})
 
 
 @wrap_tool

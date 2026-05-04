@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ghia.atomic import atomic_write_text
 from ghia.repo_detect import config_filename_for
@@ -61,15 +61,58 @@ class Config(BaseModel):
     Note: ``repo`` is intentionally NOT a field — it's encoded in the
     filename so a stale config file can never disagree with its name.
     Same logic for ``token``: gh owns it.
+
+    ``labels`` semantics:
+    * ``["ai-fix"]`` (default) — only fetch issues with this label
+    * ``[]`` — no label filter, fetch every open issue
+    * ``["bug", "enhancement"]`` — OR semantics (issues with EITHER label)
+
+    Pre-v0.2.1 configs used a single ``label: str`` field. The
+    model_validator below transparently migrates those to ``labels``
+    so existing files keep loading without re-running the wizard.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=False)
 
-    label: str = Field(default="ai-fix", min_length=1)
+    labels: list[str] = Field(default_factory=lambda: ["ai-fix"])
     mode: Literal["semi", "full"] = "semi"
     poll_interval_min: int = Field(default=30, ge=5)
     test_command: Optional[str] = None
     lint_command: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_label_field(cls, data: Any) -> Any:
+        """Translate legacy ``label: "X"`` into ``labels: ["X"]``.
+
+        Runs before the schema is enforced (extra="forbid") so the
+        legacy ``label`` key doesn't trip validation. If both ``label``
+        and ``labels`` are supplied, ``labels`` wins and ``label`` is
+        dropped — the user clearly intended the new shape.
+        """
+
+        if not isinstance(data, dict):
+            return data
+        if "label" in data and "labels" not in data:
+            legacy = data.pop("label")
+            if isinstance(legacy, str) and legacy.strip():
+                data["labels"] = [legacy.strip()]
+            else:
+                data["labels"] = []
+        elif "label" in data and "labels" in data:
+            data.pop("label")
+        return data
+
+    @property
+    def label(self) -> Optional[str]:
+        """Back-compat shim: first label or None when no filter is set.
+
+        Older code paths read ``cfg.label``; preserve that for now,
+        callers that need full multi-label semantics should use
+        ``cfg.labels`` directly.
+        """
+
+        return self.labels[0] if self.labels else None
 
 
 def default_config_dir() -> Path:

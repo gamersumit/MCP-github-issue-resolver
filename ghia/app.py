@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from ghia.config import Config, load_config
+from ghia.config import Config, config_path_for, load_config
 from ghia.redaction import install_filter
 from ghia.repo_detect import detect_repo
 from ghia.session import SessionStore
@@ -57,6 +57,11 @@ class GhiaApp:
     session: SessionStore
     repo_root: Path
     repo_full_name: str
+    # Where the per-repo Config lives on disk. Tools that need to
+    # persist config edits (e.g. set_mode) write back to this path so
+    # the choice survives stop/start. Optional because some tests
+    # construct the dataclass directly without a backing file.
+    config_path: Optional[Path] = None
     logger: logging.Logger = field(
         default_factory=lambda: logging.getLogger("ghia")
     )
@@ -120,8 +125,10 @@ async def create_app(
     # Load the per-repo config (or the explicit path for tests).
     if config_path is not None:
         cfg = load_config(path=config_path)
+        resolved_config_path: Optional[Path] = Path(config_path)
     else:
         cfg = load_config(owner=owner, name=name)
+        resolved_config_path = config_path_for(owner, name)
 
     # Redaction stays installed defensively even though no token is
     # registered: the regex safety net still scrubs any token-shaped
@@ -136,5 +143,6 @@ async def create_app(
         session=session,
         repo_root=root,
         repo_full_name=full,
+        config_path=resolved_config_path,
         logger=logging.getLogger("ghia"),
     )
