@@ -69,12 +69,54 @@ pip install --quiet --upgrade pip
 echo "Installing runtime dependencies…"
 pip install --quiet -r requirements.txt
 
-# Editable install so two console scripts (github-issue-agent and
-# github-issue-agent-setup) land on $PATH inside .venv. The user invokes
-# the wizard via `github-issue-agent-setup` from any repo dir — they
-# never need to know the venv path.
+# Editable install lands two console scripts in .venv/bin/:
+#   github-issue-agent          (the MCP server entry point)
+#   github-issue-agent-setup    (the per-repo wizard)
+# But .venv/bin/ is NOT on the user's PATH, so neither script is callable
+# from a target repo without activating the venv — defeating the point of
+# the user-scope MCP design. We symlink both into ~/.local/bin/ below to
+# make them globally callable.
 echo "Installing package in editable mode…"
 pip install --quiet -e .
+
+# ----------------------------------------------------------------------
+# Expose console scripts on the user's PATH
+# ----------------------------------------------------------------------
+#
+# v0.2.0 fix: ~/.local/bin is the standard XDG user-scope bin dir and is
+# already on PATH for the vast majority of Linux distros and recent macOS
+# shells (per `man 7 file-hierarchy` + Ubuntu's default ~/.profile). We
+# symlink so the user can run `github-issue-agent-setup` from inside ANY
+# repo without remembering the venv path. Idempotent: -f overwrites stale
+# symlinks (e.g. from a previous clone path) so re-running install.sh
+# from a fresh clone Just Works.
+
+LOCAL_BIN="$HOME/.local/bin"
+mkdir -p "$LOCAL_BIN"
+
+echo ""
+echo "Linking console scripts into $LOCAL_BIN…"
+ln -sf "$REPO_ROOT/.venv/bin/github-issue-agent"       "$LOCAL_BIN/github-issue-agent"
+ln -sf "$REPO_ROOT/.venv/bin/github-issue-agent-setup" "$LOCAL_BIN/github-issue-agent-setup"
+echo "  $LOCAL_BIN/github-issue-agent        -> $REPO_ROOT/.venv/bin/github-issue-agent"
+echo "  $LOCAL_BIN/github-issue-agent-setup  -> $REPO_ROOT/.venv/bin/github-issue-agent-setup"
+
+# Warn (but don't fail) if ~/.local/bin isn't on PATH yet. This is the
+# one-line fix the user needs in their shell rc, and is the only manual
+# step left after install.sh runs.
+case ":$PATH:" in
+    *":$LOCAL_BIN:"*)
+        : # already on PATH — nothing to do
+        ;;
+    *)
+        echo ""
+        echo "Note: $LOCAL_BIN is not on your PATH yet. Add this line to"
+        echo "your shell rc (~/.bashrc or ~/.zshrc) and restart the shell:"
+        echo ""
+        echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+        echo ""
+        ;;
+esac
 
 # ----------------------------------------------------------------------
 # Claude Code MCP registration (best-effort, USER scope, idempotent)

@@ -53,9 +53,11 @@ What this does:
 
 - Creates a venv and installs deps
 - Registers the MCP server with Claude Code at **user** scope (so it works in every project, not just the clone dir)
-- Installs two console scripts: `github-issue-agent` (the MCP server) and `github-issue-agent-setup` (the per-repo wizard)
+- Installs two console scripts (`github-issue-agent` and `github-issue-agent-setup`) and symlinks them into `~/.local/bin/` so the wizard is callable from inside any repo without activating the venv
 
-The installer is idempotent — re-running it on a machine that already has the MCP registered detects the existing registration and fixes the scope if needed.
+The installer is idempotent — re-running it detects the existing MCP registration, fixes the scope if needed, and refreshes the `~/.local/bin/` symlinks so it's safe to re-run after moving the clone.
+
+> **PATH note.** `~/.local/bin/` is on `PATH` by default on Ubuntu/Debian/Fedora and recent macOS shells. If `github-issue-agent-setup` isn't found after install, add `export PATH="$HOME/.local/bin:$PATH"` to your `~/.bashrc` or `~/.zshrc` and restart the shell — install.sh will print this hint when it detects the gap.
 
 ### Prerequisites
 
