@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "github-issue-agent"
-version = "0.2.2"
+version = "0.2.3"
 description = "MCP server that helps Claude Code autonomously resolve GitHub issues."
 readme = "README.md"
 requires-python = ">=3.10"

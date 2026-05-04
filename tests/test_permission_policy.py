@@ -26,39 +26,65 @@ from ghia.policy import permission_policy as policy
 @pytest.mark.parametrize(
     "tool_name",
     [
-        "Read",
-        "Edit",
-        "Write",
-        "MultiEdit",
-        "Glob",
-        "Grep",
-        "NotebookEdit",
+        # File / notebook editing
+        "Read", "Edit", "Write", "MultiEdit",
+        "Glob", "Grep",
+        "NotebookEdit", "NotebookRead",
         "TodoWrite",
+        # Task tracking — the v0.2.2 release missed these and users
+        # got "unknown tool (TaskCreate)" prompts every time the LLM
+        # set up its task list.
+        "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop",
+        "TaskOutput",
+        # Plan / interactive flow
+        "EnterPlanMode", "ExitPlanMode", "AskUserQuestion",
+        # Sub-agents and skills (the sub-agent's own tool calls go
+        # through this same policy so we don't need to gate at the
+        # spawn site).
+        "Agent", "Task", "Skill", "ToolSearch", "SlashCommand",
+        # Background-process tools
+        "BashOutput", "KillShell", "KillBash",
+        # Scheduling
+        "ScheduleWakeup", "CronCreate", "CronDelete", "CronList",
+        # Worktree / monitoring / notifications
+        "EnterWorktree", "ExitWorktree", "Monitor",
+        "PushNotification", "RemoteTrigger", "SendMessage",
+        # MCP tools — every server, every tool name
+        "mcp__github-issue-agent__start",
+        "mcp__github-issue-agent__status",
+        "mcp__some-other-server__do-thing",
     ],
 )
-def test_safe_tools_auto_allow(tool_name: str) -> None:
+def test_non_bash_tools_auto_allow(tool_name: str) -> None:
+    """Every non-Bash, non-Web tool is LLM-bounded → allow without prompting.
+
+    The v0.2.2 policy enumerated a handful of "safe" tools and asked
+    on everything else. Users hit "unknown tool (TaskCreate)" every
+    time the LLM created a task. v0.2.3 inverts: only Bash and the
+    web-reaching tools get scrutiny; everything else allows.
+    """
+
     decision, reason = policy.decide(tool_name, {})
     assert decision == "allow", f"{tool_name} should auto-allow ({reason!r})"
 
 
-def test_agent_own_mcp_auto_allow() -> None:
-    """Calls into our own MCP server are always safe."""
-
-    decision, _ = policy.decide("mcp__github-issue-agent__start", {})
-    assert decision == "allow"
-
-
-@pytest.mark.parametrize("tool_name", ["WebFetch", "WebSearch", "Task", "Agent"])
-def test_unbounded_tools_ask(tool_name: str) -> None:
-    """Net / sub-agent tools surface a prompt — too unbounded to auto-allow."""
+@pytest.mark.parametrize("tool_name", ["WebFetch", "WebSearch"])
+def test_web_tools_ask(tool_name: str) -> None:
+    """Web-reaching tools still surface a prompt — exfil / payload risk."""
 
     decision, _ = policy.decide(tool_name, {})
     assert decision == "ask"
 
 
-def test_unknown_tool_falls_through_to_ask() -> None:
+def test_unknown_tool_now_allows() -> None:
+    """Even tools we've never heard of allow (LLM-bounded by definition).
+
+    A new internal Claude Code tool that didn't exist when this
+    policy was written shouldn't suddenly start prompting users.
+    """
+
     decision, _ = policy.decide("BrandNewToolThatNobodyKnows", {})
-    assert decision == "ask"
+    assert decision == "allow"
 
 
 def test_empty_tool_name_asks() -> None:
@@ -266,6 +292,85 @@ def test_curl_to_github_allowed() -> None:
         {"command": "curl -sL https://raw.githubusercontent.com/foo/bar/main/README.md"},
     )
     assert decision == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl http://localhost:8080/healthz",
+        "curl https://localhost:3000/api/foo",
+        "curl http://127.0.0.1:5000/",
+        "curl http://[::1]:8080/v1",
+        "curl http://service.local:9090/metrics",
+    ],
+)
+def test_curl_to_localhost_allowed(command: str) -> None:
+    """Dev / test endpoints on localhost must NOT be classified as exfil."""
+
+    decision, reason = policy.decide("Bash", {"command": command})
+    assert decision == "allow", f"{command!r} should allow ({reason!r})"
+
+
+# ----------------------------------------------------------------------
+# Bash: DB clients + dev servers (added in v0.2.3)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Postgres
+        "psql -h localhost -U postgres -c 'SELECT 1'",
+        "pg_dump mydb > backup.sql",
+        "pgcli postgres://user:pass@localhost/db",
+        # MySQL
+        "mysql -u root -e 'SHOW TABLES'",
+        "mysqldump --all-databases",
+        # MongoDB
+        "mongosh mongodb://localhost:27017 --eval 'db.users.count()'",
+        "mongo --version",
+        # Redis / Memcache
+        "redis-cli ping",
+        # SQLite
+        "sqlite3 data.db '.tables'",
+        # SQL Server
+        "sqlcmd -S localhost -U sa -Q 'SELECT @@VERSION'",
+        # Modern lakehouse / NewSQL
+        "duckdb data.parquet",
+        "clickhouse-client --query='SELECT 1'",
+    ],
+)
+def test_bash_db_clients_allowed(command: str) -> None:
+    decision, reason = policy.decide("Bash", {"command": command})
+    assert decision == "allow", f"{command!r} should allow ({reason!r})"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Python web servers
+        "flask run --debug",
+        "gunicorn app:app",
+        "uvicorn main:app --reload",
+        "hypercorn asgi:app",
+        # JS / TS dev tooling
+        "next dev",
+        "nuxt dev --port 3000",
+        "vite",
+        "wrangler dev",
+        "nodemon server.js",
+        # Ruby / Rails
+        "bundle install",
+        "rails server",
+        "bin/rails db:migrate",
+        # Migrations
+        "alembic upgrade head",
+        "prisma migrate dev",
+    ],
+)
+def test_bash_dev_servers_and_migrations_allowed(command: str) -> None:
+    decision, reason = policy.decide("Bash", {"command": command})
+    assert decision == "allow", f"{command!r} should allow ({reason!r})"
 
 
 # ----------------------------------------------------------------------
