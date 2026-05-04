@@ -293,9 +293,23 @@ _ALLOW_GH_SUBCOMMANDS: frozenset[str] = frozenset({
 # ``npm test`` vs ``npm run lint`` because those are exactly the
 # sub-operations the agent's protocol expects to drive.
 _ALLOW_TOOLCHAIN_FIRST_TOKEN: frozenset[str] = frozenset({
-    # JS / TS
+    # JS / TS — package managers, runtimes, bundlers, dev servers,
+    # and the monorepo / scaffolding crowd.
     "npm", "npx", "yarn", "pnpm", "bun", "deno", "node",
+    "corepack",  # node 16.10+ shim manager
     "tsc", "ts-node", "tsx", "vite",
+    # React ecosystem (CRA scripts, Storybook, Expo, RN, Next CLI).
+    # `next` is also under dev-servers below — duplicate is harmless.
+    "react-scripts", "craco",
+    "storybook", "start-storybook", "build-storybook",
+    "expo", "expo-cli", "eas",
+    "react-native", "react-native-cli",
+    # Monorepo orchestrators
+    "lerna", "turbo", "nx", "rush", "moon", "lage",
+    # Static-site / docs frameworks (often invoked locally)
+    "docusaurus", "vuepress", "vitepress",
+    # Deploy CLIs (push to their own clouds; auth-bounded by user creds)
+    "vercel", "netlify", "now", "amplify",
     # Python
     "python", "python3", "pip", "pip3", "pipx", "poetry", "uv",
     "pdm", "conda", "mamba", "pyenv",
@@ -322,8 +336,22 @@ _ALLOW_TOOLCHAIN_FIRST_TOKEN: frozenset[str] = frozenset({
     "ghc", "ghci", "cabal", "stack", "hlint",
     # Elixir
     "elixir", "iex", "mix",
-    # Swift / ObjC
+    # Swift / ObjC / mobile
     "swift", "swiftc", "xcodebuild", "xcrun",
+    "pod", "cocoapods", "fastlane",
+    # Dart / Flutter / Kotlin (mobile)
+    "dart", "flutter", "fvm",
+    "kotlin", "kotlinc-jvm", "kotlinc-js",
+    # Less-common but real
+    "zig", "nim", "crystal", "shards",
+    "ocaml", "ocamlc", "dune", "opam",
+    "haxe", "haxelib",
+    "racket", "raco",
+    "lua", "luarocks", "luajit",
+    "julia",
+    "r", "Rscript", "rstudio",
+    "nix", "nix-build", "nix-shell",
+    "guix",
     # .NET
     "dotnet", "msbuild", "csc", "fsharpc",
     # Test runners
@@ -443,13 +471,30 @@ def _segment_is_allowed(segment: str) -> tuple[bool, str]:
     if not first:
         return False, "empty segment"
 
-    # Strip a leading ./ so `./gradlew test` matches `gradlew`.
-    bare = first.lstrip("./")
+    # Extract the *basename* of the first token so a binary invoked
+    # by absolute or relative path classifies the same as the bare
+    # form. Examples this normalises:
+    #   /tmp/exptracker-venv/bin/pip   → pip
+    #   ./venv/bin/python              → python
+    #   ./node_modules/.bin/eslint     → eslint
+    #   vendor/bin/phpunit             → phpunit
+    #   /usr/local/bin/cargo           → cargo
+    #   ./gradlew                      → gradlew
+    # On Windows-style paths (rare in WSL but possible via
+    # cross-mounted dirs) we also handle backslashes.
+    bare = first.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
 
     if bare in _ALLOW_FIRST_TOKEN:
         return True, f"read-only inspection ({bare})"
     if bare in _ALLOW_TOOLCHAIN_FIRST_TOKEN:
         return True, f"toolchain ({bare})"
+
+    # Versioned interpreter binaries — `python3.12`, `node-22`,
+    # `ruby2.7`, etc. The bare form misses these because nobody
+    # wants to enumerate every minor version, but the prefix is
+    # well-defined.
+    if _BARE_VERSIONED_PATTERN.match(bare):
+        return True, f"toolchain ({bare}, versioned form)"
 
     # git / gh need a subcommand check.
     if bare == "git":
@@ -463,13 +508,30 @@ def _segment_is_allowed(segment: str) -> tuple[bool, str]:
             return True, f"gh {sub}"
         return False, f"gh {sub or '(no subcommand)'} not in allowlist"
 
-    # Regex-form allow patterns (sed -n, xargs, etc).
+    # Regex-form allow patterns (sed -n, xargs, etc). We match
+    # against the cleaned segment but ALSO replace the path-form
+    # first token with its basename so `^curl ...` patterns survive
+    # `/usr/bin/curl ...` invocations.
     cleaned = _strip_env_assignments(segment)
+    if first != bare and cleaned.startswith(first):
+        cleaned_for_regex = bare + cleaned[len(first):]
+    else:
+        cleaned_for_regex = cleaned
     for pattern in _ALLOW_FIRST_TOKEN_REGEX:
-        if pattern.match(cleaned):
+        if pattern.match(cleaned_for_regex):
             return True, f"matched safe pattern ({pattern.pattern[:30]})"
 
     return False, f"command not in allow categories ({bare})"
+
+
+# `python3.12`, `python3.13`, `node-22`, `ruby2.7`, `node-v22`, etc.
+# Anchored on a known interpreter family so a random `mypythonshim2.0`
+# doesn't slip through.
+_BARE_VERSIONED_PATTERN = re.compile(
+    r"^(python|python3|node|ruby|php|perl|go|java|dotnet|"
+    r"rustc|gcc|clang|swift|gradle|mvn)"
+    r"[-_v]?\d+(\.\d+)*$"
+)
 
 
 def _git_subcommand(segment: str) -> str:

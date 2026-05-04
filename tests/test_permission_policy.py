@@ -348,6 +348,100 @@ def test_bash_db_clients_allowed(command: str) -> None:
 @pytest.mark.parametrize(
     "command",
     [
+        # User's exact failing case — temp-venv's pip invoked by absolute path.
+        "/tmp/exptracker-venv/bin/pip --version",
+        "/tmp/exptracker-venv/bin/python -m pytest",
+        # Project venv invoked by relative path
+        "./venv/bin/python -m pip install -r requirements.txt",
+        ".venv/bin/pytest tests/",
+        # Node project's local tools
+        "./node_modules/.bin/eslint src/",
+        "./node_modules/.bin/jest --watch",
+        "node_modules/.bin/tsc --noEmit",
+        # Ruby vendor / gradlew / mvnw / shim binaries
+        "vendor/bin/phpunit",
+        "./gradlew test",
+        "./mvnw verify",
+        # System-installed via absolute path (rare but harmless)
+        "/usr/local/bin/cargo build",
+        "/usr/bin/git status",
+    ],
+)
+def test_bash_path_prefixed_binaries_allowed(command: str) -> None:
+    """Binaries invoked by path must classify by their basename, not the path.
+
+    v0.2.3 stripped only `./`; absolute / nested-venv paths fell
+    through to ask. v0.2.4 takes the basename so the user's
+    `/tmp/exptracker-venv/bin/pip --version` allows like `pip`.
+    """
+
+    decision, reason = policy.decide("Bash", {"command": command})
+    assert decision == "allow", f"{command!r} should allow ({reason!r})"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3.12 -m pytest",
+        "python3.11 --version",
+        "python3.13 -m venv .venv",
+        "node-22 server.js",
+        "ruby2.7 script.rb",
+        "go1.22 build",
+    ],
+)
+def test_bash_versioned_interpreters_allowed(command: str) -> None:
+    """`python3.12`, `node-22`, etc. should classify the same as bare names."""
+
+    decision, reason = policy.decide("Bash", {"command": command})
+    assert decision == "allow", f"{command!r} should allow ({reason!r})"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # React ecosystem
+        "react-scripts test --watchAll=false",
+        "react-scripts build",
+        "craco start",
+        "next build",
+        "next start",
+        # Storybook
+        "start-storybook -p 6006",
+        "storybook dev",
+        "build-storybook",
+        # React Native / Expo
+        "react-native run-android",
+        "expo start",
+        "eas build --platform ios",
+        # Monorepo orchestrators
+        "turbo run build",
+        "nx run-many --target=test --all",
+        "lerna run lint",
+        "rush update",
+        # Mobile (Flutter / Dart / Cocoapods / fastlane)
+        "flutter test",
+        "dart format .",
+        "pod install",
+        "fastlane ios beta",
+        # Other languages
+        "kotlin --version",
+        "zig build test",
+        "lua script.lua",
+        "Rscript -e 'library(dplyr)'",
+        # Deploy CLIs
+        "vercel deploy --prod",
+        "netlify deploy",
+    ],
+)
+def test_bash_extended_toolchain_allowed(command: str) -> None:
+    decision, reason = policy.decide("Bash", {"command": command})
+    assert decision == "allow", f"{command!r} should allow ({reason!r})"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         # Python web servers
         "flask run --debug",
         "gunicorn app:app",
