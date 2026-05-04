@@ -111,6 +111,31 @@ A PreToolUse permission policy auto-approves a wide set of safe commands and har
 
 **If a command lands in "ask":** try once. If denied, **don't keep retrying minor variations of the same blocked command** — find a different path through the auto-approved set. Three failed prompts in a row means stop and surface the situation to the user with a one-line explanation of what you were trying to accomplish.
 
+## Permission stacking — never sit idle waiting for approval
+
+Permission prompts are synchronous in Claude Code: a single `ask` blocks the conversation until the user answers. You CAN'T literally fork off and continue. But you can re-shape the work so prompts cluster at boundaries instead of interrupting flow:
+
+1. **Sequence by approval cost.** Inside ONE issue, do all auto-approved work first (Read, Edit, Write, Glob, Grep, git non-destructive, package-manager, tests/lint, MCP tools, gh, localhost curl), THEN reach for anything that might prompt (curl to a third-party API, a novel binary, a custom script). The fix is mostly done before the first prompt fires; if the user is AFK when the prompt arrives, only the last 1% is blocked.
+
+2. **On a denial, switch sub-tasks instead of stalling.** If a Bash call returns blocked / asked-and-denied, don't sit waiting:
+   - **In FULL mode**: skip this issue (label it `human-review` with the specific command that needs approval), move to the next issue in the queue, return to this one when the user responds.
+   - **In SEMI mode**: while the user is reviewing one prompt, keep editing other files in the same fix, write tests, draft the commit message — anything that doesn't depend on the denied command's output. When the user answers, pick up that thread.
+   - Either mode: never type "waiting for your response" and stop. Find SOMETHING auto-approved to make progress on.
+
+3. **Stack pending approvals into one batched message.** When you finish all auto-approved work and have N pending permissions, surface them as a single list with rationale, NOT N separate prompts:
+
+   > Done with everything I can do without approval. Pending:
+   > 1. `curl https://internal-api.example.com/healthcheck` — verify the fix's prod deployment after merge
+   > 2. `./scripts/db-seed.sh` — refresh the test fixture (custom in-repo script)
+   >
+   > Approve any of these (or suggest alternatives) and I'll continue. The PR is otherwise ready — branch `fix/issue-42-foo`, all tests pass.
+
+4. **Never retry the same denied command via a different shell.** If `wget https://external` was denied, don't try `curl https://external`, `python -c "import urllib..."`, or `node -e "fetch(...)"` to the same host. The deny is intentional — pick a different approach or stop.
+
+5. **Pick up async feedback.** If the user grants a permission mid-session (responds "yes" to a prompt, edits `settings.json`, or appends to `GHIA_POLICY_ALLOW_EXTRA` and restarts), continue with the previously-blocked command on your next turn — don't re-derive whether it's needed, the plan was already valid.
+
+6. **Don't pre-emptively ask for approval.** Don't dump a "here are 12 commands I might run, please approve" list before starting work. That moves friction earlier, doesn't reduce it. Only batch approvals you ACTUALLY needed.
+
 ## Naming
 - Branch: fix/issue-{number}-{short-slug-kebab-case-max-40}
 - Commit: "fix: {short description} (closes #{number})"
