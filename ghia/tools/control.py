@@ -82,34 +82,36 @@ def _snapshot_dict(state: SessionState) -> dict[str, Any]:
 
 @wrap_tool
 async def issue_agent_start(app: GhiaApp) -> ToolResponse:
-    """Transition the agent from ``idle`` to ``active``.
+    """Transition the agent to active, or refresh state if already active.
 
-    Flow:
-      1. Lock the session.  Reject with ``INVALID_INPUT`` if already
-         active (double-start is a user error, not a silent retry).
-      2. Run convention discovery (async, thread-off-loaded).
-      3. Persist: ``status="active"``, ``session_started=<now>``,
-         ``mode=app.config.mode`` (the wizard's choice, NOT the stale
-         session value), ``discovered_conventions=<summary>``,
-         ``default_branch=<fallback>``, ``repo=<auto-detected>``.
-      4. Trigger one immediate polling tick so the queue is populated
-         on first start (instead of making the user wait for the first
-         scheduled poll, which can be up to ``poll_interval_min``
-         minutes away).
-      5. Start the background polling task.
+    Idempotent in v0.2.1+: re-calling start while already active is no
+    longer an error — it's the natural way for a user to pick up a
+    fresh wizard config (new mode / new label filter) without an
+    explicit stop+start dance. The flow:
+
+      1. Lock the session.
+      2. Run convention discovery (async).
+      3. Persist: ``status="active"``, ``mode=app.config.mode`` (wizard
+         is source of truth on every start, fresh OR refresh),
+         ``repo=<auto-detected>``, conventions, default-branch fallback.
+         When already active, ``session_started`` is preserved so the
+         user's "how long has this been running" timer stays accurate.
+      4. Trigger one immediate polling tick so the queue reflects the
+         current config (and so first-start users don't have to wait
+         up to ``poll_interval_min`` minutes for matching issues).
+      5. Ensure the background polling task is running.
       6. Render the protocol string with the freshly-populated queue
-         and a human-friendly summary of the label filter.
-      7. Return ``{protocol, mode, queue, label_summary,
-         discovered_conventions_preview}``.
+         and a human-friendly label-filter summary.
+      7. Return ``{protocol, mode, queue, label_filter,
+         discovered_conventions_preview, refreshed}`` — the new
+         ``refreshed`` flag tells the caller this was a re-start
+         (``True``) vs a cold start (``False``) so the LLM can phrase
+         the announcement appropriately.
     """
 
     async with app.session.lock:
         current = await app.session.read()
-        if current.status == "active":
-            return err(
-                ErrorCode.INVALID_INPUT,
-                "agent already active; call issue_agent_stop first or issue_agent_status to inspect",
-            )
+        was_active = current.status == "active"
 
         # Run discovery *inside* the lock so a concurrent ``stop`` can't
         # clobber the conventions we're about to persist.  Discovery is
@@ -118,16 +120,19 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
 
         now = _iso_now()
         # The wizard's ``mode`` choice (``app.config.mode``) is the
-        # source of truth on every fresh start. ``set_mode`` is the
-        # only mid-session override; preserving session.mode here was
-        # a v0.2.0 bug that made "full" configs silently start in
-        # "semi" mode.
+        # source of truth on EVERY start (cold or warm). ``set_mode``
+        # mid-session dual-writes config + session, so the values are
+        # always in sync — re-reading config here just makes the
+        # behavior obvious at the read site.
+        session_started = (
+            current.session_started if was_active else now
+        )
         new_state = SessionState.model_validate({
             **current.model_dump(),
             "status": "active",
             "mode": app.config.mode,
             "repo": app.repo_full_name,
-            "session_started": now,
+            "session_started": session_started,
             "discovered_conventions": discovered,
             "default_branch": _DEFAULT_BRANCH_FALLBACK,
         })
@@ -156,12 +161,14 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
         timestamp=_human_timestamp(now),
     )
 
-    # Start the background poller AFTER all state is persisted and the
-    # initial fetch has run. The poller is the lone "ambient" piece of
-    # the agent — every other tool is request/response — so its
-    # lifecycle has to be bound tightly to start/stop or it will leak
-    # across sessions.
-    await polling.start_polling(app)
+    # Start the background poller only if one isn't already running.
+    # On a refresh (was_active=True) the existing poll task keeps
+    # ticking and we'd just leak a second one. On a cold start (or
+    # after a crash that left status="active" but the task gone), the
+    # spawn happens.
+    existing_task = getattr(app, "_polling_task", None)
+    if existing_task is None or existing_task.done():
+        await polling.start_polling(app)
 
     preview = (discovered or "")[:200]
     return ok({
@@ -170,7 +177,8 @@ async def issue_agent_start(app: GhiaApp) -> ToolResponse:
         "queue": list(new_state.queue),
         "label_filter": _label_filter_summary(app.config.labels),
         "discovered_conventions_preview": preview,
-        "session_started": now.isoformat(),
+        "session_started": session_started.isoformat() if session_started else now.isoformat(),
+        "refreshed": was_active,
     })
 
 

@@ -121,14 +121,28 @@ async def test_start_from_idle_activates(app: GhiaApp) -> None:
     assert state.session_started is not None
 
 
-async def test_start_from_active_rejected(app: GhiaApp) -> None:
+async def test_start_when_already_active_refreshes(app: GhiaApp) -> None:
+    """Re-calling start while active is now idempotent (v0.2.1+).
+
+    The user-facing motivation: after editing the wizard config to
+    switch mode/labels, the natural call is ``start`` again — a hard
+    error here was an unhelpful footgun that forced a stop+start
+    dance. The re-call now refreshes config-derived state in place,
+    flagged via ``refreshed=True`` so the LLM can phrase its
+    announcement accordingly. ``session_started`` is preserved so the
+    "how long has this been running" timer doesn't reset on refresh.
+    """
+
     first = await control.issue_agent_start(app)
     assert first.success
+    assert first.data["refreshed"] is False
+    original_started = first.data["session_started"]
 
     second = await control.issue_agent_start(app)
-    assert not second.success
-    assert second.code == ErrorCode.INVALID_INPUT
-    assert "already active" in (second.error or "").lower()
+    assert second.success
+    assert second.data["refreshed"] is True
+    # session_started must not reset on refresh.
+    assert second.data["session_started"] == original_started
 
 
 async def test_stop_from_active_returns_to_idle(app: GhiaApp) -> None:
