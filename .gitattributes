@@ -1,0 +1,37 @@
+# Normalize all text files to LF in the repo and on checkout.
+# Without this, Windows / WSL / OneDrive checkouts produce CRLF working
+# trees and a perma-dirty `git status`. eol=lf forces LF on checkout
+# regardless of platform; text=auto lets git detect binary files and
+# leave them alone.
+* text=auto eol=lf
+
+# Shell scripts must stay LF — CRLF in install.sh would break /bin/bash.
+*.sh        text eol=lf
+*.bash      text eol=lf
+
+# Source + config files: explicit LF.
+*.py        text eol=lf
+*.toml      text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.json      text eol=lf
+*.jsonl     text eol=lf
+*.md        text eol=lf
+*.html      text eol=lf
+*.css       text eol=lf
+*.js        text eol=lf
+*.txt       text eol=lf
+*.cfg       text eol=lf
+*.ini       text eol=lf
+
+# Binary assets — never touch.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
+*.zip       binary
+*.gz        binary
+*.tar       binary
+*.whl       binary

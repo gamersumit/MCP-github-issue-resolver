@@ -17,7 +17,7 @@ Drops into Claude Code as a local Model Context Protocol (MCP) server, stays idl
 | Sprint 4 — Code & Git ops (TRD-022..030) | Shipped — fs/git/PR tools, native-CLI git wrapper with PyGithub fallback, Docker-sandboxed `run_tests`, allow-listed `check_linting`, `undo_last_change` with author-email guard. |
 | Sprint 5 — Polish & Ship (TRD-031..035) | Shipped — serial queue processor, polling timer with jitter, retry policy, README + packaging polish. |
 
-**479 tests** pass in ~19s. Coverage is enforced ≥ 80% at sprint exit. All MCP tools listed below are wired and reachable from Claude Code.
+**497 tests** pass in ~19s. Coverage is enforced ≥ 80% at sprint exit. All MCP tools listed below are wired and reachable from Claude Code.
 
 > **v0.2 breaking change.** PAT-based config is gone — auth now flows through your existing `gh` CLI session, repos are auto-detected from `git remote get-url origin`, and config is per-repo (`~/.config/github-issue-agent/repos/<owner>__<name>.json`). If you upgraded from v0.1, your old `~/.config/github-issue-agent/config.json` is ignored — run `github-issue-agent-setup` once per repo to migrate.
 
@@ -393,7 +393,7 @@ github-issue-agent/
 │       └── docker_runner.py     Docker SDK wrapper for run_tests
 │   ├── ui_static/picker.html    Self-contained picker UI (ships in wheel)
 │   └── prompts/agent_protocol.md  Injected into Claude on start (ships in wheel)
-├── tests/                       pytest + pytest-asyncio (479 tests)
+├── tests/                       pytest + pytest-asyncio (497 tests)
 └── docs/
     ├── PRD/PRD-2026-001-…       Product requirements (28 REQs, 85 ACs)
     └── TRD/TRD-2026-001-…       Technical design (76 TRD tasks)
@@ -405,7 +405,7 @@ github-issue-agent/
 python -m pytest -q
 ```
 
-479 tests, ~19s runtime. Coverage gate ≥ 80%.
+497 tests, ~19s runtime. Coverage gate ≥ 80%.
 
 ```bash
 python -m pytest tests/test_redaction.py -v
